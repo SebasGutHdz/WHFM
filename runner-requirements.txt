@@ -48,5 +48,5 @@ torchdyn>=1.0.5   # 1.0.4 is broken on pypi
 pot
 
 # --------- notebook reqs -------- #
-seaborn>=0.12.2
+seaborn>=0.13.2
 pandas
