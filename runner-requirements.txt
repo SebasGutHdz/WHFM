@@ -7,7 +7,7 @@
 # pip install -r requirements.txt
 # --------- pytorch --------- #
 torch>=1.11.0,<2.0.0
-torchvision>=0.11.0
+torchvision>=0.28.0
 pytorch-lightning==1.8.3
 torchmetrics==0.11.0
 
