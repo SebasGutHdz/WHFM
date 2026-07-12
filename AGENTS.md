@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This repository implements **Hamiltonian Flow Matching (HFM)** with scalar
+This repository implements **Wassestein Hamiltonian Flow Matching (WHFM)** with scalar
 Gaussian conditional Hamiltonian bridges. The immediate goal is to migrate the
 working experiments from Jupyter notebooks into a reproducible, testable Python
 library without changing the mathematical algorithm.
