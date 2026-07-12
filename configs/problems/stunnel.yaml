@@ -1,0 +1,33 @@
+name: stunnel
+dimension: 2
+
+boundaries:
+  source:
+    kind: dataset
+    name: 2d_gaussian
+    parameters:
+      mean: [-11.0, -1.0]
+      std: 0.5
+    sample_noise: 0.0
+  target:
+    kind: dataset
+    name: 2d_gaussian
+    parameters:
+      mean: [11.0, 1.0]
+      std: 0.5
+    sample_noise: 0.0
+
+functional:
+  linear: [stunnel, -35.0]
+  internal: null
+  interaction: null
+
+evaluation:
+  num_samples: 3000
+  max_metric_samples: 512
+  num_sliced_projections: 128
+  mmd_bandwidth: null
+  plot_trajectory_count: 512
+  plot_colormap: cividis
+  plot_dir1: 0
+  plot_dir2: 1

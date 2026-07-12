@@ -1,0 +1,48 @@
+name: grid_spring
+dimension: 32
+
+boundaries:
+  source:
+    kind: dataset
+    name: grid_spring
+    parameters:
+      endpoint: source
+      grid_side: 4
+      particle_dim: 2
+      grid_spacing: 3.0
+      bend_x_coeff: 0.6
+      bend_y_coeff: 0.3
+      covariance: 0.1
+    sample_noise: 0.0
+  target:
+    kind: dataset
+    name: grid_spring
+    parameters:
+      endpoint: target
+      grid_side: 4
+      particle_dim: 2
+      grid_spacing: 3.0
+      bend_x_coeff: 0.6
+      bend_y_coeff: 0.3
+      covariance: 0.1
+    sample_noise: 0.0
+
+functional:
+  linear:
+    name: grid_spring
+    coefficient: 1.0
+    parameters:
+      grid_side: 4
+      particle_dim: 2
+      kappa: 1.0
+  internal: null
+  interaction: null
+evaluation:
+  num_samples: 3000
+  max_metric_samples: 512
+  num_sliced_projections: 128
+  mmd_bandwidth: null
+  plot_trajectory_count: 512
+  plot_colormap: cividis
+  plot_dir1: 0
+  plot_dir2: 1

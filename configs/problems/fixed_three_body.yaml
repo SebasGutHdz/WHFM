@@ -1,0 +1,46 @@
+name: fixed_three_body
+dimension: 4
+
+boundaries:
+  source:
+    kind: dataset
+    name: fixed_three_body
+    parameters:
+      endpoint: source
+      r: 5.0
+      alpha: 1.5707963267948966
+      std: 0.5
+    sample_noise: 0.0
+  target:
+    kind: dataset
+    name: fixed_three_body
+    parameters:
+      endpoint: target
+      r: 5.0
+      alpha: 1.5707963267948966
+      std: 0.5
+    sample_noise: 0.0
+
+functional:
+  linear:
+    name: fixed_three_body
+    coefficient: 1.0
+    parameters:
+      fixed_position: [0.0, 0.0]
+      G: 1.0
+      central_mass: 20.0
+      moving_mass: 1.0
+      epsilon: 0.01
+      n_moving: 2
+      particle_dim: 2
+  internal: null
+  interaction: null
+evaluation:
+  num_samples: 3000
+  max_metric_samples: 512
+  num_sliced_projections: 128
+  mmd_bandwidth: null
+  plot_trajectory_count: 512
+  plot_colormap: cividis
+  plot_dir1: 0
+  plot_dir2: 1

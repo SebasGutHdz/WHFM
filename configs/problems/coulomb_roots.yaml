@@ -1,0 +1,48 @@
+name: coulomb_roots
+dimension: 12
+
+boundaries:
+  source:
+    kind: dataset
+    name: coulomb_roots
+    parameters:
+      endpoint: source
+      n_particles: 6
+      particle_dim: 2
+      radius: 2.0
+      theta: 1.0471975511965976
+      std: 0.1
+    sample_noise: 0.0
+  target:
+    kind: dataset
+    name: coulomb_roots
+    parameters:
+      endpoint: target
+      n_particles: 6
+      particle_dim: 2
+      radius: 2.0
+      theta: 1.0471975511965976
+      std: 0.1
+    sample_noise: 0.0
+
+functional:
+  linear:
+    name: coulomb_roots
+    coefficient: 1.0
+    parameters:
+      n_particles: 6
+      charges: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      coulomb_constant: 2.0
+      epsilon: 0.1
+      particle_dim: 2
+  internal: null
+  interaction: null
+evaluation:
+  num_samples: 3000
+  max_metric_samples: 512
+  num_sliced_projections: 128
+  mmd_bandwidth: null
+  plot_trajectory_count: 512
+  plot_colormap: cividis
+  plot_dir1: 0
+  plot_dir2: 1
