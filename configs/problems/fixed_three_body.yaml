@@ -27,9 +27,9 @@ functional:
     coefficient: 1.0
     parameters:
       fixed_position: [0.0, 0.0]
-      G: 1.0
-      central_mass: 20.0
-      moving_mass: 1.0
+      G: 100.0
+      central_mass: 1.0
+      moving_mass: 100.0
       epsilon: 0.01
       n_moving: 2
       particle_dim: 2
@@ -41,6 +41,5 @@ evaluation:
   num_sliced_projections: 128
   mmd_bandwidth: null
   plot_trajectory_count: 512
-  plot_colormap: cividis
   plot_dir1: 0
   plot_dir2: 1

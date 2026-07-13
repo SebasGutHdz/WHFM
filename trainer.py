@@ -97,6 +97,8 @@ class HamiltonianTrainer:
             tol=train_config.bridge_solver.tol,
             max_nodes=train_config.bridge_solver.max_nodes,
             quadrature_order=train_config.bridge_solver.quadrature_order,
+            use_monte_carlo=train_config.bridge_solver.use_monte_carlo,
+            monte_carlo_samples=train_config.bridge_solver.monte_carlo_samples,
             failure_policy=train_config.bridge_solver.failure_policy,
         )
 

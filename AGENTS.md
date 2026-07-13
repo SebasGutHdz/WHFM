@@ -1,516 +1,468 @@
-# Agents MD
+# AGENTS.md
 
 ## Purpose
 
-This repository implements **Wassestein Hamiltonian Flow Matching (WHFM)** with scalar
-Gaussian conditional Hamiltonian bridges. The immediate goal is to migrate the
-working experiments from Jupyter notebooks into a reproducible, testable Python
-library without changing the mathematical algorithm.
+This repository implements **Wasserstein Hamiltonian Flow Matching (WHFM)**,
+also called Hamiltonian Flow Matching (HFM) in the current code. The method
+learns neural velocity fields by regressing onto scalar Gaussian conditional
+paths that solve Hamiltonian boundary-value problems.
 
-Treat the notebooks as experimental references, not as the target software
-architecture. Preserve their numerical behavior while extracting reusable
-components, and document every deliberate deviation.
+The notebook-to-library migration is substantially complete. Work from the
+implemented modules and configurations described below. Notebooks under
+`examples/` are references and experiment drivers; they are not the source of
+library APIs. Preserve validated numerical behavior when extracting remaining
+notebook code, and document deliberate changes.
 
-## Mathematical source of truth
+## Mathematical contract
 
-Let \(\mu\) and \(\nu\) be the source and target boundary distributions on
-\(\mathbb R^d\). A coupling \(\pi\in\Pi(\mu,\nu)\) supplies endpoint pairs
-\(z=(x_0,x_1)\).
-
-For each endpoint pair, HFM uses a scalar Gaussian conditional path
+Let \(\mu,\nu\in\mathcal P_2(\mathbb R^d)\), and let an endpoint coupling
+\(\pi\in\Pi(\mu,\nu)\) supply pairs \(z=(x_0,x_1)\). For each pair, the current
+model uses a scalar Gaussian conditional path
 
 \[
     \rho_t(\cdot\mid z)
-    = \mathcal N\!\left(m_t^z,(s_t^z)^2 I_d\right),
-    \qquad t\in[0,1],
+    =\mathcal N\!\left(m_t^z,(s_t^z)^2I_d\right),
+    \qquad t\in[0,1].
 \]
 
-whose parameters solve the appropriate conditional Hamiltonian boundary-value
-problem. Its endpoint conditions are
+The general theory permits endpoint scales \(s_0=\sigma_0\) and
+\(s_1=\sigma_1\). The current training implementation supports the equal-scale
+case only:
 
 \[
-    m_0^z=x_0,\qquad m_1^z=x_1,\qquad
-    s_0^z=\sigma_0,\qquad s_1^z=\sigma_1.
+    m_0=x_0,\qquad m_1=x_1,\qquad s_0=s_1=\sigma,
 \]
 
-If \(X_t=m_t^z+s_t^z\varepsilon\), with
-\(\varepsilon\sim\mathcal N(0,I_d)\), the conditional velocity is
+where `bridge_solver.sigma` is strictly positive.
+
+For \(X_t=m_t+s_t\varepsilon\),
+\(\varepsilon\sim\mathcal N(0,I_d)\), the conditional velocity target is
 
 \[
     u_t(X_t\mid z)
-    = \dot m_t^z
-      + \frac{\dot s_t^z}{s_t^z}\left(X_t-m_t^z\right).
+    =\dot m_t+\frac{\dot s_t}{s_t}(X_t-m_t).
 \]
 
-Equivalently, for a full Gaussian factor \(S_t\) with covariance
-\(S_tS_t^\top\), the compatible affine field is
+The learned field minimizes
 
 \[
-    u_t(x\mid z)=\dot m_t^z+\dot S_tS_t^{-1}(x-m_t^z).
-\]
-
-The scalar implementation is the current scope. Do not silently replace it by
-a diagonal or full-covariance model.
-
-The marginal path and population velocity induced by a coupling are
-
-\[
-    \rho_t(x)=\int \rho_t(x\mid z)\,d\pi(z),
-    \qquad
-    u_t(x)=
-    \frac{\int u_t(x\mid z)\rho_t(x\mid z)\,d\pi(z)}{\rho_t(x)}.
-\]
-
-The population minimizer of the conditional flow-matching regression is this
-conditional expectation. The trainable velocity field \(v_\theta(t,x)\) is fit
-with
-
-\[
-    \mathcal L_{\mathrm{HFM}}(\theta)
+    \mathcal L(\theta)
     =\mathbb E_{z,t,X_t}
-      \left[\left\|v_\theta(t,X_t)-u_t(X_t\mid z)\right\|^2\right].
+      \left[\|v_\theta(t,X_t)-u_t(X_t\mid z)\|^2\right].
 \]
 
-The Gaussian bridge is not an arbitrary interpolant. It is the solution of a
-Hamiltonian BVP on the scalar Gaussian submanifold. If
+With the generator \(X=m+sZ\), \(Z\sim\mathcal N(0,I_d)\), the scalar
+standard-deviation coordinate has pullback mass \(d\). For a pointwise linear
+potential \(V\), the implemented force equations have the form
 
 \[
-    \mathcal V(m,s)=F\!\left(\mathcal N(m,s^2I_d)\right),
+    \ddot m_t=-\mathbb E[\nabla V(m_t+s_tZ)],
+    \qquad
+    \ddot s_t=-\frac1d\mathbb E[\langle\nabla V(m_t+s_tZ),Z\rangle],
 \]
 
-then the force equations must follow the convention derived for the problem.
-For the standard generator \(X=m+sZ\), \(Z\sim\mathcal N(0,I_d)\), the pullback
-kinetic metric is \(G=\operatorname{diag}(I_d,d)\), so the unscaled
-Euler--Lagrange form is
+plus the configured interaction force when present. Keep the factor \(1/d\)
+in the Gaussian-path force layer. Do not move dimension, mass, or potential
+coefficients into the trainer.
 
-\[
-    G\begin{pmatrix}\ddot m\\ \ddot s\end{pmatrix}
-    =-\nabla_{(m,s)}\mathcal V(m,s).
-\]
+`MeanStdBVPGaussianPath` evaluates Gaussian expectations with tensor-product
+Gauss--Hermite quadrature. Its cost grows as
+`quadrature_order ** dimension`; this is unsuitable for high-dimensional
+problems. Do not run high-dimensional configurations through that backend until
+an analytic or Monte Carlo integration mode is exposed through
+`GaussianBridgeSolver` and the YAML schema.
 
-Keep the metric or mass normalization explicit in the problem/bridge layer.
-Do not scatter factors of \(d\), \(1/d\), or potential-strength parameters
-through the training code. When porting a notebook, verify its convention
-against an analytic case before refactoring it.
+The scalar Gaussian bridge, the learned NODE trajectory, and the empirical
+endpoint coupling are different objects:
 
-## Two distinct paths
+- The NODE trajectory is generated by an EMA velocity model.
+- Minibatch OT aligns its generated endpoint with samples from the opposite
+  boundary while carrying the full trajectory as a label.
+- The aligned NODE trajectory initializes \(m_t\) and \(\dot m_t\) for the
+  Gaussian BVP.
+- The solved Gaussian BVP—not the NODE initializer—provides the regression
+  path and velocity target.
 
-Do not conflate the following objects:
+Never treat a failed BVP as a valid bridge or silently return its initializer.
 
-1. **NODE trajectory:** generated by integrating a learned velocity field. It
-   induces an endpoint map, and therefore a coupling. During rectification it
-   also supplies the initial guess for the Gaussian bridge mean and mean
-   velocity.
-2. **Conditional Hamiltonian bridge:** obtained by solving the Gaussian BVP for
-   the induced endpoint pair. It supplies the conditional probability path and
-   the regression target used to update the learned velocity field.
+## Current repository layout
 
-The NODE trajectory initializes the BVP; it is not automatically the BVP
-solution. The bridge solver must report convergence rather than hiding a failed
-solve by returning the initializer.
+The implemented modules currently live at repository root:
 
-## Algorithmic contract
+```text
+AGENTS.md
+train.py
+trainer.py
+config.py
+datasets.py
+couplings.py
+directions.py
+ema.py
+node.py
+bridge.py
+gaussian_paths.py
+solvers.py
+flow_matching.py
+losses.py
+diagnostics.py
+evaluation.py
+example_helpers.py
+Potentials/
+configs/
+  train.yaml
+  problems/
+examples/
+```
 
-There are two learned time-dependent velocity fields:
+Principal ownership:
 
-- forward: \(v^{0\to1}\), transporting from \(\mu\) toward \(\nu\);
-- backward: \(v^{1\to0}\), transporting from \(\nu\) toward \(\mu\).
+- `train.py`: thin CLI; loads the two YAML files and invokes
+  `HamiltonianTrainer`.
+- `config.py`: strict dataclass-backed configuration parsing, validation, and
+  resolved-YAML output. Unknown or missing keys are errors.
+- `trainer.py`: datasets, stages, direction passes, bridge generation,
+  optimization, evaluation, checkpoints, and run directories.
+- `datasets.py`: toy, Gaussian, particle-system, and crowd-navigation boundary
+  samplers.
+- `couplings.py`: independent and minibatch-OT pairing, including label-aware
+  pairing for NODE trajectories.
+- `directions.py`: `Direction` and `DirectionState` for online model,
+  optimizer, scheduler, and EMA ownership.
+- `ema.py`: fixed-decay and post-hoc EMA implementations.
+- `node.py`: fixed-grid Euler/RK4 NODE integration, velocity evaluation, and
+  NODE-to-BVP guess preparation.
+- `bridge.py`: the trainer-facing `GaussianBridgeSolver` and
+  `BridgeSolution`.
+- `gaussian_paths.py`: analytic, deterministic, particle, and scalar Gaussian
+  path classes plus SciPy-backed BVP caching.
+- `solvers.py`: low-level PyTorch ODE and SciPy IVP/BVP wrappers.
+- `Potentials/`: configured composite potential and linear, internal, and
+  interaction components.
+- `evaluation.py`: W2, sliced W2, MMD, terminal statistics, action/Hamiltonian
+  diagnostics, CSV output, and plots.
 
-Each direction owns an online model, EMA model, optimizer, scheduler if used,
-and checkpoint state. Direction-dependent code should use a shared abstraction
-or an explicit `Direction` enum; do not maintain copy-pasted forward and
-backward implementations.
+Do not create a parallel `src/hfm/` tree unless the task explicitly includes a
+coordinated package migration. Extend the current modules in place.
 
-### Stage 1: straight-path initialization
+## Known package boundary
 
-1. Construct the initial coupling from the training configuration:
-   `independent` or `ot`.
-2. Train the forward field by ordinary flow matching on straight conditional
-   paths from source to target.
-3. Train the backward field on the reversed endpoint pairs.
-4. Traverse the complete training dataset. Each batch produces exactly one
-   optimizer step unless gradient accumulation is explicitly configured.
-5. Only after both online models have completed initialization, create their
-   EMA copies from the online weights.
+The repository is not yet a self-contained installable Python project. It has
+no `pyproject.toml`, dependency manifest, README, or automated test suite, and
+several modules import parent-package code:
 
-For the deterministic straight path,
+```python
+from ..models.models_v2 import FourierTimeResidualMLP
+from ..optimal_transport import OTPlanSampler, wasserstein
+```
 
-\[
-    X_t=(1-t)x_0+tx_1,
-    \qquad u_t=x_1-x_0.
-\]
+Do not claim that a fresh standalone clone can already run. Until packaging is
+addressed, preserve the package context that supplies `models` and
+`optimal_transport`. A standalone-packaging change must update imports, add
+metadata/dependencies, define the supported invocation, and include a smoke
+test in the same change.
 
-If a notebook uses a noisy straight Gaussian path, expose that choice in the
-configuration and test it separately; do not make noise an implicit behavior.
+## Configuration contract
 
-### Stage 2: alternating Hamiltonian rectification
+Training uses exactly two user-facing YAML files.
 
-For `rectification_index = 0, ..., num_rectifications - 1`, perform one complete
-forward pass and one complete backward pass. A direction pass is:
+### Training YAML
 
-1. Select that direction's boundary dataset and EMA velocity model.
-2. For each boundary batch, integrate the EMA NODE from \(t=0\) to \(t=1\)
-   using the configured NODE solver and number of time steps.
-3. The start samples and generated terminal samples define the empirical
-   coupling induced by the current flow map:
+`configs/train.yaml` follows `TrainConfig` and owns:
+
+- global: `seed`, `device`, `dtype`;
+- `data`: `batch_size`, `num_workers`, `shuffle`, `drop_last`,
+  `total_samples`, `test_fraction`, `n_dataset`;
+- `model`: `width`, `hidden`, `fourier_modes`;
+- `initial_fit`: `coupling`, `epochs`, `steps_per_batch`, `noise_std`;
+- `rectification`: `num_rectifications`, `direction_order`,
+  `coupling_generation`, `steps_per_batch`, `ema_target_refresh`;
+- `node_solver`: `method`, `node_steps`;
+- `bridge_solver`: `kind`, `sigma`, `bridge_steps`, `tol`, `max_nodes`,
+  `quadrature_order`, `failure_policy`;
+- `optimization`: `learning_rate`, `weight_decay`, `scheduler`;
+- `ema`: `mode`, `decay`, `gamma`;
+- `output`: run directory, checkpoint, figure, and diagnostic controls.
+
+Supported values currently include:
+
+- initial coupling: `independent | ot`;
+- rectification generation: `own_ema | opposite_ema`;
+- NODE method: `euler | rk4`;
+- bridge kind: `scipy` only;
+- bridge failure policy: `skip_pair | raise`;
+- scheduler: `cosine | linear | none`;
+- EMA mode: `fixed | posthoc`.
+
+`bridge_solver.bridge_steps <= node_solver.node_steps` is a required invariant.
+`initial_fit.steps_per_batch` and `rectification.steps_per_batch` are real inner
+optimization counts; do not assume one gradient step per batch.
+
+`rectification.ema_target_refresh` is validated but is not currently consumed
+by `HamiltonianTrainer`. Do not describe `per_direction_pass` as implemented.
+Either implement the distinction with a test or remove the field in a focused
+configuration cleanup.
+
+### Problem YAML
+
+Problem configurations follow `ProblemConfig` and own:
+
+- `name` and ambient `dimension`;
+- `boundaries.source` and `boundaries.target`;
+- `functional.linear`, `functional.internal`, and
+  `functional.interaction`;
+- `evaluation` sampling, metric, projection, and plotting options.
+
+A functional component is `null`, `[name, coefficient]`, or a mapping with
+`name`, `coefficient`, and optional `parameters`. Linear components accept
+problem-specific parameters. Internal and interaction components currently do
+not accept parameters through `ConfiguredPotential`.
+
+Existing problem files include S-tunnel, double well, Duffing double well,
+Coulomb roots, fixed three-body, and grid-spring examples. Preserve the
+flattened state convention for particle systems: the final tensor dimension is
+the full configuration-space dimension, not the physical dimension of one
+particle.
+
+## Training algorithm as implemented
+
+### Dataset preparation
+
+`HamiltonianTrainer` samples `data.total_samples` once from each boundary,
+creates independently seeded source and target permutations, and forms train
+and test splits. Each rectification uses an independently seeded subset of
+`data.n_dataset` samples from each training boundary.
+
+### Stage 1: straight-path warmup
+
+For every warmup epoch:
+
+1. Zip source and target loaders.
+2. Pair minibatches with `Coupler(initial_fit.coupling)`.
+3. Train the forward model on
 
    \[
-       \pi_\theta=(\operatorname{Id},T_\theta)_\#\mu
+       X_t=(1-t)x_0+tx_1+\eta,\qquad
+       u_t=x_1-x_0,
    \]
 
-   in the forward direction, with the analogous reversed construction in the
-   backward direction.
-4. Use the NODE positions and velocities to initialize the Gaussian BVP mean
-   \(m_t\) and mean velocity \(\dot m_t\). Obtain NODE velocities by evaluating
-   the velocity model along the trajectory, not by finite differences unless a
-   solver-specific reason is documented.
-5. Initialize the scalar standard-deviation path through the bridge solver's
-   configured strategy. Do not infer it from the NODE positions.
-6. Solve one scalar Gaussian Hamiltonian BVP per induced endpoint pair. The
-   solver returns \(m_t,\dot m_t,s_t,\dot s_t\), convergence information, and
-   residual diagnostics.
-7. Sample regression times and Gaussian noise, construct
-   \(X_t=m_t+s_t\varepsilon\), and compute the conditional velocity target.
-8. Take one gradient step on the online velocity model for the batch, then
-   update its EMA state according to the configured EMA policy.
-9. Finish the complete dataset pass before changing direction.
+   where \(\eta\sim\mathcal N(0,\texttt{noise\_std}^2I)\) when configured.
+4. In `opposite_ema` mode, also train a backward model on the reversed pair.
+5. Take `initial_fit.steps_per_batch` optimizer/scheduler steps.
 
-NODE integration and bridge construction create regression targets. They are
-non-differentiable target-generation operations in the current algorithm:
-detach their outputs and do not retain autograd graphs. Any future
-differentiable-solver experiment must be introduced as a separate, explicit
-mode.
+EMA copies are initialized only after all warmup epochs. Warmup therefore does
+not update EMA incrementally; the initial EMA is an exact copy of the completed
+online model.
 
-The EMA model used to generate a batch must be frozen for that batch. Whether
-the target EMA is refreshed after every batch or snapshotted for a complete
-direction pass must be a named configuration choice and must match the
-reference experiment. Never let this behavior depend on incidental object
-aliasing.
+### Stage 2: Hamiltonian rectification
 
-## Coupling semantics
+For each rectification index, execute `rectification.direction_order`, finish
+each complete direction pass, optionally checkpoint, and then evaluate.
 
-- `independent` means the two boundaries are sampled independently. A random
-  permutation within a batch is acceptable only if it reproduces independent
-  sampling for the dataset loader being used.
-- `ot` must state whether it is a global empirical OT coupling or a minibatch OT
-  coupling, and must record the cost and solver. Do not describe minibatch OT as
-  the exact population Monge map.
-- During rectification, the learned NODE induces the new coupling. Do not
-  recompute the configured initial coupling inside a rectification pass.
-- Preserve pair ordering through NODE integration, BVP solution, time/noise
-  sampling, and loss evaluation.
+There are two implemented coupling-generation modes.
 
-## Configuration
+#### `own_ema`
 
-Use exactly two user-facing YAML files.
+This is a single-model, forward-only mode:
 
-### Training configuration
+1. Integrate the forward EMA from an empirical source minibatch.
+2. Minibatch-OT pair the generated terminal points with an empirical target
+   minibatch while carrying the NODE trajectories as labels.
+3. Use the aligned source trajectories as the mean/velocity initial guess.
+4. Solve Gaussian BVPs between the aligned empirical source and target points.
+5. Train the forward online model on successful bridge solutions.
 
-This file contains algorithmic and computational choices shared by problems.
-At minimum, validate fields equivalent to:
+Configuration validation requires `direction_order` to contain only
+`forward` in this mode.
 
-```yaml
-seed: 0
-device: cuda
-dtype: float32
+#### `opposite_ema`
 
-data:
-  batch_size: 256
-  num_workers: 0
-  shuffle: true
+This mode owns forward and backward models:
 
-initial_fit:
-  coupling: independent       # independent | ot
-  epochs: 1
+- To train the forward model, integrate the backward EMA from target samples,
+  OT-align the generated source endpoints with empirical source samples,
+  reverse the aligned trajectories, and solve source-to-target Gaussian BVPs.
+- To train the backward model, integrate the forward EMA from source samples,
+  OT-align the generated target endpoints with empirical target samples,
+  reverse the aligned trajectories, and solve target-to-source Gaussian BVPs.
 
-rectification:
-  num_rectifications: 1
-  direction_order: [forward, backward]
-  ema_decay: 0.999
-  ema_target_refresh: per_batch  # per_batch | per_direction_pass
+`_generation_state_for(direction)` must return the opposite direction in this
+mode. Preserve the signs and endpoints in
+`NodeSolver.prepare_bridge_guess(reverse=True)`.
 
-node_solver:
-  method: euler
-  num_steps: 20
+For both modes, bridge generation is under `torch.no_grad()`. The NODE and BVP
+outputs are detached targets. Each successful bridge batch is resampled at
+random times and Gaussian noises for `rectification.steps_per_batch` gradient
+steps. The online model and scheduler update first; its EMA then updates after
+every bridge optimizer step.
 
-bridge_solver:
-  scipy
-  
+Rectification always uses a minibatch OT alignment through
+`self.rectification_coupler = Coupler("ot")`. This is distinct from
+`initial_fit.coupling`. Do not replace it with the warmup coupling or describe
+it as an exact population Monge map.
 
-optimization:
-  learning_rate: 5.0e-5
-  weight_decay: 0.0
+## NODE and bridge solver invariants
 
-output:
-  root: results
-  run_name: null
-  checkpoint_every_direction_pass: true
-```
+`NodeTrajectory.states` and `.velocities` have shape
+`(node_steps + 1, batch, dim)`. `NodeSolver` temporarily switches the generation
+model to evaluation mode and restores its previous training state.
 
-Names may adapt to the existing codebase, but their ownership must not. In
-particular, `num_rectifications` and `initial_fit.coupling` belong here.
+`prepare_bridge_guess`:
 
-### Problem configuration
+- optionally time-reverses positions and sign-reverses velocities;
+- subsamples to `bridge_steps + 1` nodes;
+- overwrites the first and last mean values with the exact BVP endpoints;
+- returns detached NumPy arrays for SciPy.
 
-This file defines the mathematical and data problem. It should contain:
+`BridgeSolution` stores successful pairs only in its path tensors:
 
-- source and target dataset specifications;
-- ambient dimension;
-- endpoint Gaussian scales \(\sigma_0,\sigma_1\);
-- potential/functional and force parameters;
-- problem-specific bridge parameters or analytic expectations;
-- optional evaluation sample sizes and problem-specific metrics.
+- `mean`, `mean_velocity`: `(successful, bridge_steps + 1, dim)`;
+- `std`, `std_velocity`: `(successful, bridge_steps + 1, 1)`;
+- success/failed indices refer to the originally requested batch.
 
-Example shape:
+The current scalar BVP solver:
 
-```yaml
-name: example_problem
-dimension: 2
+- runs SciPy `solve_bvp` serially, one pair at a time, on CPU;
+- uses learned NODE guesses for mean and mean velocity when supplied;
+- defaults to constant \(s=\sigma\) and \(\dot s=0\) guesses;
+- enforces both mean endpoints and `std(0) = std(1) = sigma`;
+- rejects nonpositive standard-deviation paths;
+- returns successful pairs or raises according to `failure_policy`;
+- records solve time, SciPy iterations, mesh nodes, failures, and endpoint
+  errors.
 
-boundaries:
-  source:
-    kind: dataset_name
-    parameters: {}
-  target:
-    kind: dataset_name
-    parameters: {}
+`BridgeSolution.residual_norms` is currently filled with `NaN`; residual
+evaluation is not implemented. Do not claim that residual tolerances are
+checked. SciPy success, positivity, and endpoint diagnostics are the current
+validation signals.
 
-conditional_bridge:
-  sigma_0: 0.05
-  sigma_1: 0.05
+Do not divide by the standard deviation before verifying positivity. Do not
+hide CPU/device or float32/float64 conversions inside training loops outside
+the solver boundary.
 
-functional:
-  name: external_potential
-  parameters: {}
+## Potentials
 
-evaluation:
-  num_samples: 3000
-```
+`ConfiguredPotential` composes weighted linear, internal, and interaction
+energies. Use its explicit component methods:
 
-Do not duplicate a key across the two YAML files. Parse YAML once, validate it
-into typed configuration objects, resolve defaults visibly, and save the fully
-resolved configurations with every run. Unknown keys should raise an error.
+- `linear_energy`, `linear_gradient`;
+- `internal_energy`;
+- `interaction_energy`, `interaction_gradient`.
 
-## Entry point and orchestration
+The trainable mean/std BVP currently uses `linear_gradient` and, when present,
+an interaction gradient with frozen reference samples. It does not include the
+configured internal force in its RHS. `DensityGaussianPath` and the internal
+potential schedules are separate legacy/analytic paths. Do not assume that
+selecting `functional.internal` in a training problem automatically produces
+the correct Hamiltonian Gaussian BVP; implement and test that force before
+advertising support.
 
-The command-line entry point is `train.py` and should remain thin:
+Potential sign conventions matter. The training path uses Hamiltonian force
+`-gradient`, while evaluation reports action as kinetic integral minus
+potential integral. Verify any new potential against its analytic gradient and
+a simple trajectory before using it in a full training run.
+
+## Outputs and evaluation
+
+Runs are created under
 
 ```text
-python train.py \
-  --train-config configs/train/default.yaml \
-  --problem-config configs/problems/example.yaml
+<output.root>/<problem.name>/<run_name-or-timestamp>/
+  resolved_train.yaml
+  resolved_problem.yaml
+  checkpoints/
+  metrics/
+  samples/
+  figures/
+  logs/
 ```
 
-The training orchestration must:
+Warmup and rectification evaluation cover online and EMA models. Current
+metrics include W2, sliced W2, RBF MMD, terminal mean/covariance error,
+Hamiltonian drift integrals, action, kinetic and potential integrals, bridge
+success statistics, and optional diagnostic plots.
 
-1. load and validate both configurations;
-2. set random seeds and deterministic options;
-3. create the boundary datasets and loaders;
-4. build both velocity models and their optimizers;
-5. create a unique run directory and save resolved configurations;
-6. execute straight-path initialization;
-7. initialize both EMA models;
-8. execute alternating Hamiltonian rectifications;
-9. checkpoint resumable state;
-10. run post-training sampling and evaluation;
-11. save diagnostics, metrics, and generated artifacts.
+Checkpoints save model, optimizer, scheduler, EMA, RNG, metrics, configuration,
+stage, direction, and completed-pass metadata. A trainer-level resume path is
+not implemented. Do not call checkpoints resumable until loading and control
+flow are added and tested.
 
-Future experiment tracking, including Weights & Biases, belongs behind a logger
-interface. The core algorithm must run without an external account or network
-connection.
+## Development priorities
 
-## Preferred library boundaries
+Unless a task specifies otherwise, prioritize remaining library work in this
+order:
 
-Adapt names to the repository if a package structure already exists. For a new
-library, prefer responsibilities comparable to:
+1. Add a real test suite covering configuration, couplings, NODE reversal,
+   scalar BVP endpoints/positivity/failure, EMA, both rectification modes, and a
+   tiny end-to-end run.
+2. Make the repository independently installable: package metadata,
+   dependencies, imports, README, and a verified CLI command.
+3. Expose a dimension-safe Gaussian expectation backend (analytic where
+   possible; Monte Carlo otherwise) before running high-dimensional problems.
+4. Implement bridge residual diagnostics instead of returning `NaN`.
+5. Either implement `ema_target_refresh` or remove the unused option.
+6. Add checkpoint loading and exact pass-level resume semantics.
+7. Parallelize the serial SciPy pair solves or add a validated PyTorch/GPU BVP
+   backend without changing `GaussianBridgeSolver.solve_batch` semantics.
+8. Add experiment tracking behind an optional logger interface.
 
-```text
-train.py
-configs/
-src/hfm/
-  config.py
-  data.py
-  couplings.py
-  directions.py
-  models/
-    velocity.py
-  solvers/
-    node.py
-    gaussian_bridge.py
-  problems/
-    base.py
-    registry.py
-  training/
-    straight_flow_matching.py
-    rectification.py
-    trainer.py
-    ema.py
-  evaluation/
-  io.py
-tests/
-notebooks/
-```
+Do not bundle several of these structural changes into an unrelated numerical
+or modeling change.
 
-The central interfaces should be small and explicit:
+## Required tests for changes
 
-- `BoundaryProblem`: creates datasets and evaluates the reduced Hamiltonian
-  forces/potential;
-- `Coupler`: turns source and target batches into paired endpoint batches;
-- `NodeSolver`: returns time grid, states, and model velocities;
-- `GaussianBridgeSolver`: accepts endpoints plus an initialization and returns a
-  validated `BridgeSolution`;
-- `DirectionState`: owns online model, EMA model, optimizer, and direction;
-- `Trainer`: owns stage and pass orchestration, not mathematical force formulas.
+There is currently no committed automated test suite. Every behavioral change
+should add focused tests. At minimum:
 
-`BridgeSolution` should carry, at minimum, the time grid, `mean`,
-`mean_velocity`, `std`, `std_velocity`, convergence flags, endpoint errors, and
-residual norms. Document tensor shapes in type hints or docstrings.
+- configuration changes: valid and invalid YAML/dict cases;
+- couplings: shape, device, label preservation, and deterministic seeded case;
+- NODE changes: Euler/RK4 endpoint and reverse-position/reverse-velocity signs;
+- Gaussian forces: analytic zero, harmonic, or double-well comparisons;
+- bridge changes: endpoint conditions, positivity, success masks, partial and
+  total failure policies;
+- EMA changes: exact initialization, no gradients, update count, fixed/post-hoc
+  decay, and state round trip;
+- trainer changes: both `own_ema` and `opposite_ema` on a tiny fixed-seed
+  problem;
+- evaluation changes: metric sanity and headless plotting.
 
-Design `GaussianBridgeSolver.solve_batch(...)` now, even if the first
-implementation loops serially. A later CPU-parallel backend should be able to
-replace the serial map without changing the trainer or mathematical result.
-
-## Numerical invariants and failure policy
-
-- Require \(s_t>0\) at every regression time. Prefer a positivity-preserving
-  parameterization in the bridge solver. A clamp is not a valid silent repair;
-  if used for floating-point safety, record its frequency and magnitude.
-- Check both mean and standard-deviation endpoint conditions.
-- Check the Hamiltonian ODE/BVP residual against configured tolerances.
-- Keep the NODE time grid and bridge time grid distinct. Interpolate through a
-  named, tested utility when they differ.
-- Never divide by `std` without a validated lower bound.
-- Fail fast on NaN/Inf losses, states, forces, or residuals and save the failing
-  batch diagnostics.
-- A bridge failure policy must be explicit: `raise`, `skip_batch`, or a named
-  retry strategy. Never silently train on an unconverged bridge.
-- Preserve dtype and device deliberately. If the BVP solver requires CPU or
-  float64, perform the conversion at the solver boundary and convert the
-  validated result back once.
-- Potential and force evaluation must be vectorized when possible. Avoid hidden
-  device synchronization or repeated CPU/GPU transfers inside time loops.
-
-## Tests required during the notebook-to-library migration
-
-Add tests before or together with each extracted component.
-
-1. **Configuration:** valid examples load; missing, duplicated, inconsistent,
-   or unknown fields fail clearly.
-2. **Straight path:** sampled targets equal \(x_1-x_0\), and forward/backward
-   reversal has the correct sign and endpoints.
-3. **Zero-force bridge:** the mean is linear; equal endpoint standard deviations
-   remain constant under the chosen convention.
-4. **Analytic Hamiltonian cases:** compare against every analytic Gaussian
-   solution already used in the notebooks or thesis, including OT or Gaussian
-   Schrödinger bridge cases when available.
-5. **Conditional velocity:** samples evolved by the affine conditional velocity
-   reproduce the prescribed Gaussian mean and covariance to numerical
-   tolerance.
-6. **BVP validation:** endpoint errors and residuals are reported; forced
-   nonconvergence triggers the configured failure policy.
-7. **Couplings:** independent and OT pairings have correct shapes, device, and
-   pair preservation.
-8. **EMA:** initialization is an exact copy; updates modify EMA parameters but
-   never receive gradients.
-9. **Direction symmetry:** swapping boundaries and direction gives the expected
-   reversed data flow without using the wrong model or optimizer.
-10. **Rectification smoke test:** a tiny fixed-seed problem completes one forward
-    and one backward direction pass and can resume from its checkpoint.
-
-When porting from a notebook, create a fixed-seed regression fixture and compare
-intermediate quantities, not only the final plot: paired endpoints, NODE
-terminal states, initial BVP guess, solved bridge parameters, conditional
-velocity targets, loss, and one-step parameter updates.
-
-## Diagnostics and saved state
-
-At minimum, log per direction and rectification:
-
-- flow-matching loss;
-- NODE terminal displacement and finite-state checks;
-- bridge convergence rate, iteration count, residual norm, and endpoint error;
-- minimum/maximum standard deviation;
-- retry/skip counts;
-- optimizer learning rate;
-- optional Hamiltonian energy drift as a solver diagnostic.
-
-Energy conservation is a diagnostic for autonomous Hamiltonian test problems;
-do not assume it applies unchanged to every configured functional or numerical
-scheme.
-
-A resumable checkpoint contains both online models, both EMA models, both
-optimizers and schedulers, current stage, rectification index, direction,
-completed batch/pass counters, random-number-generator states, and resolved
-configurations. Resuming must not repeat a completed direction pass.
-
-Organize each run under one unique directory containing, at minimum:
-
-```text
-resolved_train.yaml
-resolved_problem.yaml
-checkpoints/
-metrics/
-samples/
-figures/
-logs/
-```
-
-Do not let plotting code determine training behavior. Post-training evaluation
-must be callable independently from a checkpoint.
+When migrating a notebook result, compare intermediate fixed-seed quantities:
+endpoint pairs, OT label permutation, NODE terminal states, BVP guesses, solved
+mean/std paths, conditional velocities, loss, and one optimizer update. A
+similar final plot is not sufficient evidence of equivalence.
 
 ## Coding rules
 
-- Use PyTorch consistently unless a repository-level decision explicitly
-  changes the backend.
-- Prefer typed dataclasses or an equivalent validated schema for configuration
-  and result objects.
-- Use clear mathematical names (`mean`, `mean_velocity`, `std`,
-  `std_velocity`) at solver boundaries. Short symbols are acceptable only in
-  local derivations.
-- State tensor shapes and time conventions in public docstrings.
-- Keep sampling explicit by passing a generator or RNG state where practical.
-- Do not import executable code from notebooks.
-- Do not add notebook-only path mutations, global mutable state, or hidden
-  configuration constants to the library.
-- Do not catch broad exceptions around numerical solvers without re-raising a
-  contextual error or applying a configured retry policy.
-- Keep changes scoped. Do not combine migration, mathematical reformulation,
-  architecture replacement, and performance optimization in one change.
+- Use PyTorch for learned models and tensor operations. SciPy is the current BVP
+  backend; keep that boundary explicit.
+- Preserve strict config validation and resolved-config saving.
+- Use `Direction`/`DirectionState`; do not create separate copy-pasted training
+  loops for forward and backward models.
+- Keep public tensor shapes and time orientation in docstrings.
+- Pass or seed RNGs explicitly where reproducibility matters. New stochastic
+  bridge approximations must expose their seed/state.
+- Keep plotting and evaluation out of mathematical solver code.
+- Do not import executable logic from notebooks.
+- Do not add path mutations, hidden global configuration, or silent numerical
+  fallbacks.
+- Do not silently clamp a failed or nonpositive standard-deviation path into a
+  valid one.
+- Raise contextual errors or use the configured pair-failure policy; do not
+  catch broad solver exceptions and continue invisibly.
+- Keep changes scoped and preserve unrelated experiment code.
 
-## Current and future scope
+## Definition of done
 
-Current implementation target:
+A change is complete when:
 
-- scalar Gaussian conditional bridges;
-- serial bridge solution;
-- forward and backward velocity fields;
-- straight-path initialization;
-- independent or OT initial coupling;
-- EMA-based alternating rectification;
-- local metrics and checkpointing.
+1. its behavior agrees with the mathematical contract or explicitly documents
+   a deliberate approximation;
+2. configuration and public tensor shapes are explicit;
+3. relevant fixed-seed unit or integration tests pass;
+4. numerical failures are observable through exceptions or diagnostics;
+5. resolved configs, metrics, and checkpoints remain consistent;
+6. notebooks call the library implementation rather than retaining a second
+   copy of changed logic;
+7. current limitations are not presented as implemented features.
 
-Planned extensions, which should have interfaces but no speculative
-implementation unless requested:
-
-- parallel Gaussian BVP solution across multiple CPUs;
-- Weights & Biases logging;
-- diagonal or full-covariance Gaussian bridges;
-- alternative NODE and BVP backends;
-- differentiable bridge solvers.
-
-## Definition of done for a migration change
-
-A notebook component has been successfully migrated only when:
-
-1. it has a library API with no dependence on notebook state;
-2. its configuration is explicit and validated;
-3. its numerical convention matches the mathematical source of truth;
-4. fixed-seed outputs agree with the reference experiment within a stated
-   tolerance;
-5. unit or integration tests cover its main invariant and failure mode;
-6. the relevant run state and diagnostics can be saved and resumed;
-7. the notebook can call the library implementation instead of maintaining a
-   second copy.
-
-If the notebook behavior and the formal algorithm disagree, stop and report the
-discrepancy. Do not choose whichever version is easier to implement.
+If a notebook, configuration, and formal algorithm disagree, stop and report
+the discrepancy before changing behavior.

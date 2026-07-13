@@ -18,23 +18,33 @@ from .model import (
     trajectory_quantities,
 )
 from .plotting import (
+    POTENTIAL_COLORMAP,
+    TIME_COLORMAP,
+    _particle_plot_descriptor,
     _plot_linear_contour,
+    _plot_positions,
     _project,
     _projected_plot_domain,
     _projection_indices,
+    _reshape_particle_positions,
     save_bridge_solution_plots,
     save_evaluation_plots,
     save_warmup_plots,
 )
 
 __all__ = [
+    "POTENTIAL_COLORMAP",
+    "TIME_COLORMAP",
     "METRIC_FIELDNAMES",
     "WARMUP_METRIC_FIELDNAMES",
     "_median_bandwidth",
+    "_particle_plot_descriptor",
     "_plot_linear_contour",
+    "_plot_positions",
     "_project",
     "_projected_plot_domain",
     "_projection_indices",
+    "_reshape_particle_positions",
     "append_metrics_row",
     "append_warmup_metrics_row",
     "bridge_summary",

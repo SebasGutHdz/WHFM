@@ -39,7 +39,9 @@ bridge_solver:
   bridge_steps: 30
   tol: 1.0e-2
   max_nodes: 200
-  quadrature_order: 4
+  quadrature_order: 3
+  use_monte_carlo: true
+  monte_carlo_samples: 10
   failure_policy: skip_pair
 
 optimization:

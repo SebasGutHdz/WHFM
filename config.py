@@ -170,10 +170,15 @@ class BridgeSolverConfig:
     tol: float = 1e-2
     max_nodes: int = 1000
     quadrature_order: int = 4
+    use_monte_carlo: bool = False
+    monte_carlo_samples: int = 100
     failure_policy: str = "skip_pair"
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "BridgeSolverConfig":
+        data = dict(data)
+        data.setdefault("use_monte_carlo", False)
+        data.setdefault("monte_carlo_samples", 100)
         cfg = _strict_dataclass(cls, data, "bridge_solver")
         if cfg.kind != "scipy":
             raise ValueError("bridge_solver.kind currently supports only 'scipy'.")
@@ -181,6 +186,8 @@ class BridgeSolverConfig:
             raise ValueError("bridge_solver.sigma must be positive for scalar Gaussian bridges.")
         if cfg.bridge_steps <= 0 or cfg.max_nodes <= 0 or cfg.quadrature_order <= 0:
             raise ValueError("bridge_solver step, node, and quadrature sizes must be positive.")
+        if cfg.monte_carlo_samples <= 0:
+            raise ValueError("bridge_solver.monte_carlo_samples must be positive.")
         if cfg.tol <= 0.0:
             raise ValueError("bridge_solver.tol must be positive.")
         if cfg.failure_policy not in {"skip_pair", "raise"}:
@@ -458,7 +465,6 @@ class EvaluationConfig:
     num_sliced_projections: int = 128
     mmd_bandwidth: Optional[float] = None
     plot_trajectory_count: int = 64
-    plot_colormap: str = "cividis"
     plot_dir1: int = 0
     plot_dir2: int = 1
 
@@ -473,8 +479,6 @@ class EvaluationConfig:
             raise ValueError("evaluation.mmd_bandwidth must be null or positive.")
         if cfg.plot_trajectory_count < 0:
             raise ValueError("evaluation.plot_trajectory_count must be nonnegative.")
-        if not str(cfg.plot_colormap):
-            raise ValueError("evaluation.plot_colormap must be nonempty.")
         if cfg.plot_dir1 < 0 or cfg.plot_dir2 < 0:
             raise ValueError("evaluation plot directions must be nonnegative indices.")
         return cfg

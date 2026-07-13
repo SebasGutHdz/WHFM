@@ -61,6 +61,8 @@ class GaussianBridgeSolver:
         tol: float,
         max_nodes: int,
         quadrature_order: int,
+        use_monte_carlo: bool = False,
+        monte_carlo_samples: int = 100,
         failure_policy: str = "skip_pair",
     ):
         if failure_policy not in {"skip_pair", "raise"}:
@@ -71,6 +73,8 @@ class GaussianBridgeSolver:
         self.tol = float(tol)
         self.max_nodes = int(max_nodes)
         self.quadrature_order = int(quadrature_order)
+        self.use_monte_carlo = bool(use_monte_carlo)
+        self.monte_carlo_samples = int(monte_carlo_samples)
         self.failure_policy = failure_policy
 
     def solve_batch(
@@ -99,6 +103,8 @@ class GaussianBridgeSolver:
             tol=self.tol,
             max_nodes=self.max_nodes,
             quadrature_order=self.quadrature_order,
+            use_monte_carlo=self.use_monte_carlo,
+            monte_carlo_samples=self.monte_carlo_samples,
             mu_guess=mean_guess,
             mu_dot_guess=mean_velocity_guess,
             sigma_guess=std_guess,

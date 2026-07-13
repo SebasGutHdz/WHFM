@@ -32,7 +32,7 @@ functional:
     parameters:
       n_particles: 6
       charges: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-      coulomb_constant: 2.0
+      coulomb_constant: 4.0
       epsilon: 0.1
       particle_dim: 2
   internal: null
@@ -43,6 +43,5 @@ evaluation:
   num_sliced_projections: 128
   mmd_bandwidth: null
   plot_trajectory_count: 512
-  plot_colormap: cividis
   plot_dir1: 0
   plot_dir2: 1

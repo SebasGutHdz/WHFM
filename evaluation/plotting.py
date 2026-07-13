@@ -2,12 +2,58 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable
 
 import numpy as np
 import torch
 from torch import Tensor
+
+
+TIME_COLORMAP = "autumn"
+POTENTIAL_COLORMAP = "viridis"
+
+
+@dataclass(frozen=True)
+class _ParticlePlotDescriptor:
+    n_particles: int
+    particle_dim: int
+
+
+def _particle_plot_descriptor(potential, dim: int | None = None) -> _ParticlePlotDescriptor | None:
+    linear = getattr(potential, "linear", None)
+    component = linear if linear is not None else potential
+    class_name = component.__class__.__name__
+    if class_name not in {"FixedCenterThreeBodyPotential", "GridSpringPotential", "SmoothCoulombPotential"}:
+        return None
+
+    n_particles = getattr(component, "n_particles", None)
+    if n_particles is None:
+        n_particles = getattr(component, "n_moving", None)
+    particle_dim = getattr(component, "particle_dim", None)
+    if n_particles is None or particle_dim is None:
+        return None
+    try:
+        n_particles = int(n_particles)
+        particle_dim = int(particle_dim)
+    except (TypeError, ValueError):
+        return None
+    if n_particles <= 0 or particle_dim != 2:
+        return None
+    if dim is not None and n_particles * particle_dim != int(dim):
+        return None
+    return _ParticlePlotDescriptor(n_particles=n_particles, particle_dim=particle_dim)
+
+
+def _reshape_particle_positions(x: Tensor, descriptor: _ParticlePlotDescriptor) -> Tensor:
+    expected_dim = descriptor.n_particles * descriptor.particle_dim
+    if x.shape[-1] != expected_dim:
+        raise ValueError(
+            "particle plotting expected final dimension "
+            f"{expected_dim}, got {x.shape[-1]}."
+        )
+    return x.reshape(*x.shape[:-1], descriptor.n_particles, descriptor.particle_dim)
 
 
 def _projection_indices(config, dim: int):
@@ -25,6 +71,26 @@ def _project(x: Tensor, config) -> Tensor:
     if x.shape[-1] == 1 and i == j:
         return torch.stack([x[..., i], torch.zeros_like(x[..., i])], dim=-1)
     return x[..., [i, j]]
+
+
+def _plot_positions(x: Tensor, config, descriptor: _ParticlePlotDescriptor | None) -> Tensor:
+    if descriptor is not None:
+        return _reshape_particle_positions(x, descriptor)
+    return _project(x, config)
+
+
+def _time_values_for_plot(t_np: np.ndarray, traj_plot: np.ndarray) -> np.ndarray:
+    points_per_time = int(np.prod(traj_plot.shape[1:-1]))
+    return np.repeat(t_np, points_per_time)
+
+
+def _set_position_labels(ax, evaluation_config, descriptor: _ParticlePlotDescriptor | None) -> None:
+    if descriptor is not None:
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        return
+    ax.set_xlabel(f"x{evaluation_config.plot_dir1}")
+    ax.set_ylabel(f"x{evaluation_config.plot_dir2}")
 
 
 def save_evaluation_plots(
@@ -49,15 +115,16 @@ def save_evaluation_plots(
     except Exception as exc:  # pragma: no cover - optional plotting dependency
         return {"trajectory_plot": f"plot unavailable: {exc}"}
 
-    traj_plot = _project(traj[:, :count], evaluation_config).detach().cpu().numpy()
-    generated_plot = _project(generated[:count], evaluation_config).detach().cpu().numpy()
-    reference_plot = _project(reference[:count], evaluation_config).detach().cpu().numpy()
+    particle_descriptor = _particle_plot_descriptor(potential, traj.shape[-1])
+    traj_plot = _plot_positions(traj[:, :count], evaluation_config, particle_descriptor).detach().cpu().numpy()
+    generated_plot = _plot_positions(generated[:count], evaluation_config, particle_descriptor).detach().cpu().numpy()
+    reference_plot = _plot_positions(reference[:count], evaluation_config, particle_descriptor).detach().cpu().numpy()
     t_np = time_grid.detach().cpu().numpy()
-    cmap = plt.get_cmap(evaluation_config.plot_colormap)
+    cmap = plt.get_cmap(TIME_COLORMAP)
     norm = plt.Normalize(vmin=float(t_np[0]), vmax=float(t_np[-1]))
 
     def add_time_scatter(ax):
-        time_values = np.repeat(t_np, traj_plot.shape[1])
+        time_values = _time_values_for_plot(t_np, traj_plot)
         ax.scatter(
             traj_plot[..., 0].reshape(-1),
             traj_plot[..., 1].reshape(-1),
@@ -69,18 +136,23 @@ def save_evaluation_plots(
             linewidths=0,
         )
         ax.autoscale()
-        ax.set_xlabel(f"x{evaluation_config.plot_dir1}")
-        ax.set_ylabel(f"x{evaluation_config.plot_dir2}")
+        _set_position_labels(ax, evaluation_config, particle_descriptor)
 
     def add_terminal_points(ax):
         ax.scatter(
-            generated_plot[:, 0],
-            generated_plot[:, 1],
+            generated_plot[..., 0].reshape(-1),
+            generated_plot[..., 1].reshape(-1),
             s=12,
             alpha=0.75,
             label="generated terminal",
         )
-        ax.scatter(reference_plot[:, 0], reference_plot[:, 1], s=12, alpha=0.75, label="target")
+        ax.scatter(
+            reference_plot[..., 0].reshape(-1),
+            reference_plot[..., 1].reshape(-1),
+            s=12,
+            alpha=0.75,
+            label="target",
+        )
         ax.legend(markerscale=1.5)
         ax.autoscale()
 
@@ -116,8 +188,7 @@ def save_evaluation_plots(
         domain_tensors=(source_reference, generated, reference),
     )
     add_terminal_points(ax)
-    ax.set_xlabel(f"x{evaluation_config.plot_dir1}")
-    ax.set_ylabel(f"x{evaluation_config.plot_dir2}")
+    _set_position_labels(ax, evaluation_config, particle_descriptor)
     terminal_path = figures_dir / f"{tag}_terminal_scatter.png"
     fig.savefig(terminal_path, bbox_inches="tight")
     plt.close(fig)
@@ -160,15 +231,16 @@ def save_warmup_plots(
     except Exception as exc:  # pragma: no cover - optional plotting dependency
         return {"trajectory_plot": f"plot unavailable: {exc}"}
 
-    traj_plot = _project(traj[:, :count], evaluation_config).detach().cpu().numpy()
-    generated_plot = _project(generated[:count], evaluation_config).detach().cpu().numpy()
-    reference_plot = _project(reference[:count], evaluation_config).detach().cpu().numpy()
+    particle_descriptor = _particle_plot_descriptor(potential, traj.shape[-1])
+    traj_plot = _plot_positions(traj[:, :count], evaluation_config, particle_descriptor).detach().cpu().numpy()
+    generated_plot = _plot_positions(generated[:count], evaluation_config, particle_descriptor).detach().cpu().numpy()
+    reference_plot = _plot_positions(reference[:count], evaluation_config, particle_descriptor).detach().cpu().numpy()
     t_np = time_grid.detach().cpu().numpy()
-    cmap = plt.get_cmap(evaluation_config.plot_colormap)
+    cmap = plt.get_cmap(TIME_COLORMAP)
     norm = plt.Normalize(vmin=float(t_np[0]), vmax=float(t_np[-1]))
 
     def add_time_scatter(ax):
-        time_values = np.repeat(t_np, traj_plot.shape[1])
+        time_values = _time_values_for_plot(t_np, traj_plot)
         ax.scatter(
             traj_plot[..., 0].reshape(-1),
             traj_plot[..., 1].reshape(-1),
@@ -180,18 +252,23 @@ def save_warmup_plots(
             linewidths=0,
         )
         ax.autoscale()
-        ax.set_xlabel(f"x{evaluation_config.plot_dir1}")
-        ax.set_ylabel(f"x{evaluation_config.plot_dir2}")
+        _set_position_labels(ax, evaluation_config, particle_descriptor)
 
     def add_terminal_points(ax):
         ax.scatter(
-            generated_plot[:, 0],
-            generated_plot[:, 1],
+            generated_plot[..., 0].reshape(-1),
+            generated_plot[..., 1].reshape(-1),
             s=12,
             alpha=0.75,
             label="generated terminal",
         )
-        ax.scatter(reference_plot[:, 0], reference_plot[:, 1], s=12, alpha=0.75, label="target")
+        ax.scatter(
+            reference_plot[..., 0].reshape(-1),
+            reference_plot[..., 1].reshape(-1),
+            s=12,
+            alpha=0.75,
+            label="target",
+        )
         ax.legend(markerscale=1.5)
         ax.autoscale()
 
@@ -227,8 +304,7 @@ def save_warmup_plots(
         domain_tensors=(source_reference, generated, reference),
     )
     add_terminal_points(ax)
-    ax.set_xlabel(f"x{evaluation_config.plot_dir1}")
-    ax.set_ylabel(f"x{evaluation_config.plot_dir2}")
+    _set_position_labels(ax, evaluation_config, particle_descriptor)
     terminal_path = figures_dir / f"{tag}_terminal_scatter.png"
     fig.savefig(terminal_path, bbox_inches="tight")
     plt.close(fig)
@@ -259,7 +335,8 @@ def save_bridge_solution_plots(
         return {"plot_error": f"plot unavailable: {exc}"}
 
     t_np = time_grid.detach().cpu().numpy()
-    mean_plot = _project(mean, evaluation_config).detach().cpu().numpy()
+    particle_descriptor = _particle_plot_descriptor(potential, mean.shape[-1])
+    mean_plot = _plot_positions(mean, evaluation_config, particle_descriptor).detach().cpu().numpy()
     std_plot = std[..., 0].detach().cpu().numpy()
 
     fig, ax = plt.subplots()
@@ -270,12 +347,29 @@ def save_bridge_solution_plots(
         evaluation_config,
         domain_tensors=(mean, source_reference),
     )
-    for path_mean in mean_plot:
-        ax.plot(path_mean[:, 0], path_mean[:, 1], alpha=0.45, linewidth=0.9)
-    ax.scatter(mean_plot[:, 0, 0], mean_plot[:, 0, 1], s=10, alpha=0.7, label="x0")
-    ax.scatter(mean_plot[:, -1, 0], mean_plot[:, -1, 1], s=10, alpha=0.7, label="x1")
-    ax.set_xlabel(f"x{evaluation_config.plot_dir1}")
-    ax.set_ylabel(f"x{evaluation_config.plot_dir2}")
+    if particle_descriptor is None:
+        for path_mean in mean_plot:
+            ax.plot(path_mean[:, 0], path_mean[:, 1], alpha=0.45, linewidth=0.9)
+        ax.scatter(mean_plot[:, 0, 0], mean_plot[:, 0, 1], s=10, alpha=0.7, label="x0")
+        ax.scatter(mean_plot[:, -1, 0], mean_plot[:, -1, 1], s=10, alpha=0.7, label="x1")
+    else:
+        for path_mean in mean_plot:
+            ax.plot(path_mean[..., 0], path_mean[..., 1], alpha=0.45, linewidth=0.9)
+        ax.scatter(
+            mean_plot[:, 0, :, 0].reshape(-1),
+            mean_plot[:, 0, :, 1].reshape(-1),
+            s=10,
+            alpha=0.7,
+            label="x0",
+        )
+        ax.scatter(
+            mean_plot[:, -1, :, 0].reshape(-1),
+            mean_plot[:, -1, :, 1].reshape(-1),
+            s=10,
+            alpha=0.7,
+            label="x1",
+        )
+    _set_position_labels(ax, evaluation_config, particle_descriptor)
     ax.legend(markerscale=1.5)
     mean_path = figures_dir / f"{tag}_mean_trajectories.png"
     fig.savefig(mean_path, bbox_inches="tight")
@@ -299,6 +393,7 @@ def _projected_plot_domain(
     *,
     padding_fraction: float = 0.1,
     min_padding: float = 1.0,
+    particle_descriptor: _ParticlePlotDescriptor | None = None,
 ) -> tuple[Tensor, Tensor]:
     i, j = _projection_indices(evaluation_config, dim)
     projected = []
@@ -312,7 +407,11 @@ def _projected_plot_domain(
         if device is None:
             device = tensor.device
             dtype = tensor.dtype
-        values = tensor.detach().to(device=device, dtype=dtype).reshape(-1, dim)[:, [i, j]]
+        values = tensor.detach().to(device=device, dtype=dtype)
+        if particle_descriptor is None:
+            values = values.reshape(-1, dim)[:, [i, j]]
+        else:
+            values = _reshape_particle_positions(values, particle_descriptor).reshape(-1, 2)
         projected.append(values)
     if not projected:
         raise ValueError("contour domain requires at least one non-empty tensor.")
@@ -339,10 +438,12 @@ def _plot_linear_contour(
         return
     i, j = _projection_indices(evaluation_config, source_reference.shape[-1])
     ref = source_reference.mean(dim=0)
+    particle_descriptor = _particle_plot_descriptor(potential, source_reference.shape[-1])
     low, high = _projected_plot_domain(
         domain_tensors if domain_tensors is not None else (source_reference,),
         evaluation_config,
         source_reference.shape[-1],
+        particle_descriptor=particle_descriptor,
     )
     xs = torch.linspace(low[0], high[0], 80, device=source_reference.device, dtype=source_reference.dtype)
     ys = torch.linspace(low[1], high[1], 80, device=source_reference.device, dtype=source_reference.dtype)
@@ -360,7 +461,7 @@ def _plot_linear_contour(
         values,
         levels=35,
         alpha=0.10,
-        cmap="Greys",
+        cmap=POTENTIAL_COLORMAP,
     )
     ax.contour(
         grid_x_np,
