@@ -1,2 +1,12 @@
 # .pyc files
 *.pyc
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test/cache folders
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
