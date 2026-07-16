@@ -9,9 +9,8 @@ from typing import Dict, Iterable
 import torch
 from torch import Tensor
 
-from ...optimal_transport import wasserstein
 from ..node import NodeSolver, call_velocity_model
-from .distribution import rbf_mmd2, sliced_wasserstein2
+from .distribution import MMD_loss, sinkhorn, sliced_wasserstein2
 from .plotting import save_evaluation_plots, save_warmup_plots
 
 
@@ -20,6 +19,36 @@ def cap_pair(x: Tensor, y: Tensor, max_samples: int) -> tuple[Tensor, Tensor]:
     if n <= 0:
         raise ValueError("evaluation requires at least one sample.")
     return x[:n], y[:n]
+
+
+def _metric_float(value) -> float:
+    if isinstance(value, Tensor):
+        return float(value.detach().cpu())
+    return float(value)
+
+
+def distribution_summary(
+    generated: Tensor,
+    target: Tensor,
+    num_sliced_projections: int,
+    *,
+    generator=None,
+) -> Dict[str, float]:
+    generated_flat = generated.reshape(generated.shape[0], -1)
+    target_flat = target.reshape(target.shape[0], -1)
+    mmd = MMD_loss()(generated_flat, target_flat)
+    return {
+        "sliced_w2": _metric_float(
+            sliced_wasserstein2(
+                generated,
+                target,
+                num_sliced_projections,
+                generator=generator,
+            )
+        ),
+        "sinkhorn": _metric_float(sinkhorn(generated, target)),
+        "mmd": _metric_float(mmd),
+    }
 
 
 @torch.no_grad()
@@ -145,17 +174,17 @@ def evaluate_warmup_model(
         "direction": direction,
         "model_kind": model_kind,
         "num_eval_samples": int(source_eval.shape[0]),
-        "w2": wasserstein(generated, target_eval, method="exact", power=2),
-        "sliced_w2": sliced_wasserstein2(
+        "latest_warmup_loss": latest_warmup_loss,
+        "sample_path": str(sample_path),
+    }
+    row.update(
+        distribution_summary(
             generated,
             target_eval,
             evaluation_config.num_sliced_projections,
             generator=generator,
-        ),
-        "mmd2_rbf": rbf_mmd2(generated, target_eval, evaluation_config.mmd_bandwidth),
-        "latest_warmup_loss": latest_warmup_loss,
-        "sample_path": str(sample_path),
-    }
+        )
+    )
     row.update(terminal_summary(generated, target_eval))
     row.update(plot_paths)
     return row
@@ -188,17 +217,17 @@ def evaluate_model(
         "direction": direction,
         "model_kind": model_kind,
         "num_eval_samples": int(source_eval.shape[0]),
-        "w2": wasserstein(generated, target_eval, method="exact", power=2),
-        "sliced_w2": sliced_wasserstein2(
+        "latest_loss": latest_loss,
+    }
+    row.update({key: value for key, value in q.items() if key != "hamiltonian_drift_samples"})
+    row.update(
+        distribution_summary(
             generated,
             target_eval,
             evaluation_config.num_sliced_projections,
             generator=generator,
-        ),
-        "mmd2_rbf": rbf_mmd2(generated, target_eval, evaluation_config.mmd_bandwidth),
-        "latest_loss": latest_loss,
-    }
-    row.update({key: value for key, value in q.items() if key != "hamiltonian_drift_samples"})
+        )
+    )
     row.update(terminal_summary(generated, target_eval))
     row.update(bridge_summary(bridge_metrics, rectification_index, direction))
     row.update(

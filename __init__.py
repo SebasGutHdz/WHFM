@@ -67,21 +67,16 @@ from .evaluation import (
     append_warmup_metrics_row,
     evaluate_model,
     evaluate_warmup_model,
-    rbf_mmd2,
+    MMD_loss,
+    sinkhorn,
     sliced_wasserstein2,
 )
 from .node import NodeSolver, NodeTrajectory, call_velocity_model
 from .trainer import BoundaryProblem, HamiltonianTrainer
 from .gaussian_paths import (
-    DensityGaussianPath,
     DeterministicBVPPath,
     GaussianPath,
-    HarmonicGaussianPath,
-    HillGaussianPath,
-    InteractionGaussianPath,
     MeanStdBVPGaussianPath,
-    ParametricBVPGaussianPath,
-    ParticleBVPGaussianPath,
 )
 from .Potentials import (
     ConfiguredPotential,
@@ -200,14 +195,8 @@ __all__ = [
     "von_neumann_grid_laplacian",
     "build_interaction_potential",
     "GaussianPath",
-    "HarmonicGaussianPath",
-    "HillGaussianPath",
-    "DensityGaussianPath",
     "DeterministicBVPPath",
-    "InteractionGaussianPath",
     "MeanStdBVPGaussianPath",
-    "ParticleBVPGaussianPath",
-    "ParametricBVPGaussianPath",
     "HamiltonianFlowMatcher",
     "BridgeSolution",
     "GaussianBridgeSolver",
@@ -240,7 +229,8 @@ __all__ = [
     "append_warmup_metrics_row",
     "evaluate_model",
     "evaluate_warmup_model",
-    "rbf_mmd2",
+    "MMD_loss",
+    "sinkhorn",
     "sliced_wasserstein2",
     "NodeSolver",
     "NodeTrajectory",

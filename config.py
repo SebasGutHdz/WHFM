@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -41,8 +41,14 @@ def _load_yaml(path: str | Path) -> Mapping[str, Any]:
 
 
 def _plain(value: Any) -> Any:
+    if value.__class__.__name__ == "FunctionalConfig":
+        return {
+            "linear": _plain_functional_component(value.linear),
+            "internal": _plain_functional_component(value.internal),
+            "interaction": _plain_functional_component(value.interaction),
+        }
     if is_dataclass(value):
-        return {key: _plain(item) for key, item in asdict(value).items()}
+        return {field.name: _plain(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, Mapping):
         return {str(key): _plain(item) for key, item in value.items()}
     if isinstance(value, tuple):
@@ -50,6 +56,20 @@ def _plain(value: Any) -> Any:
     if isinstance(value, list):
         return [_plain(item) for item in value]
     return value
+
+
+def _plain_functional_component(value: Any) -> Optional[Dict[str, Any]]:
+    if value is None:
+        return None
+    if not isinstance(value, tuple) or len(value) not in {2, 3}:
+        return _plain(value)
+    component_name, coefficient = value[:2]
+    parameters = value[2] if len(value) == 3 else {}
+    return {
+        "name": _plain(component_name),
+        "coefficient": _plain(coefficient),
+        "parameters": _plain({} if parameters is None else parameters),
+    }
 
 
 @dataclass(frozen=True)
@@ -165,29 +185,61 @@ class NodeSolverConfig:
 @dataclass(frozen=True)
 class BridgeSolverConfig:
     kind: str = "scipy"
-    sigma: float = 1e-2
+    sigma: Optional[float] = 1e-2
+    sigma_source: Optional[float] = None
+    sigma_target: Optional[float] = None
     bridge_steps: int = 30
     tol: float = 1e-2
     max_nodes: int = 1000
     quadrature_order: int = 4
     use_monte_carlo: bool = False
     monte_carlo_samples: int = 100
+    num_workers: int = 1
     failure_policy: str = "skip_pair"
+
+    def __post_init__(self):
+        if (self.sigma_source is None) != (self.sigma_target is None):
+            raise ValueError(
+                "bridge_solver.sigma_source and bridge_solver.sigma_target must be provided together."
+            )
+        if self.sigma_source is None:
+            if self.sigma is None:
+                raise ValueError(
+                    "bridge_solver requires either sigma or both sigma_source and sigma_target."
+                )
+            sigma = float(self.sigma)
+            sigma_source = sigma
+            sigma_target = sigma
+            object.__setattr__(self, "sigma", sigma)
+        else:
+            sigma_source = float(self.sigma_source)
+            sigma_target = float(self.sigma_target)
+            if self.sigma is not None:
+                object.__setattr__(self, "sigma", float(self.sigma))
+        if sigma_source <= 0.0 or sigma_target <= 0.0:
+            raise ValueError("bridge_solver sigma endpoints must be positive.")
+        object.__setattr__(self, "sigma_source", sigma_source)
+        object.__setattr__(self, "sigma_target", sigma_target)
+
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "BridgeSolverConfig":
         data = dict(data)
+        data.setdefault("sigma", None)
+        data.setdefault("sigma_source", None)
+        data.setdefault("sigma_target", None)
         data.setdefault("use_monte_carlo", False)
         data.setdefault("monte_carlo_samples", 100)
+        data.setdefault("num_workers", 1)
         cfg = _strict_dataclass(cls, data, "bridge_solver")
         if cfg.kind != "scipy":
             raise ValueError("bridge_solver.kind currently supports only 'scipy'.")
-        if cfg.sigma <= 0.0:
-            raise ValueError("bridge_solver.sigma must be positive for scalar Gaussian bridges.")
         if cfg.bridge_steps <= 0 or cfg.max_nodes <= 0 or cfg.quadrature_order <= 0:
             raise ValueError("bridge_solver step, node, and quadrature sizes must be positive.")
         if cfg.monte_carlo_samples <= 0:
             raise ValueError("bridge_solver.monte_carlo_samples must be positive.")
+        if cfg.num_workers < 0:
+            raise ValueError("bridge_solver.num_workers must be nonnegative.")
         if cfg.tol <= 0.0:
             raise ValueError("bridge_solver.tol must be positive.")
         if cfg.failure_policy not in {"skip_pair", "raise"}:
@@ -421,10 +473,15 @@ def _parse_functional_component(value: Any, name: str) -> Optional[tuple]:
     if value is None:
         return None
     if isinstance(value, list):
-        if len(value) != 2:
-            raise ValueError(f"{name} list form must be [name, coefficient].")
-        component_name, coefficient = value
-        parameters = {}
+        if len(value) not in {2, 3}:
+            raise ValueError(f"{name} list form must be [name, coefficient] or [name, coefficient, parameters].")
+        component_name, coefficient = value[:2]
+        parameters = value[2] if len(value) == 3 else {}
+        if parameters is None:
+            parameters = {}
+        if not isinstance(parameters, Mapping):
+            raise TypeError(f"{name}[2] parameters must be a mapping.")
+        parameters = dict(parameters)
     elif isinstance(value, Mapping):
         allowed = {"name", "coefficient", "parameters"}
         keys = set(value)
@@ -467,10 +524,18 @@ class EvaluationConfig:
     plot_trajectory_count: int = 64
     plot_dir1: int = 0
     plot_dir2: int = 1
+    plot_xlim: List[float] = field(default_factory=lambda: [0.0, 0.0])
+    plot_ylim: List[float] = field(default_factory=lambda: [0.0, 0.0])
+    xaxis_hist: float = 0.4
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "EvaluationConfig":
-        cfg = _strict_dataclass(cls, data, "evaluation")
+        values = dict(_require_mapping(data, "evaluation"))
+        values.setdefault("plot_xlim", [0.0, 0.0])
+        values.setdefault("plot_ylim", [0.0, 0.0])
+        values["plot_xlim"] = _parse_axis_limit(values["plot_xlim"], "evaluation.plot_xlim")
+        values["plot_ylim"] = _parse_axis_limit(values["plot_ylim"], "evaluation.plot_ylim")
+        cfg = _strict_dataclass(cls, values, "evaluation")
         if cfg.num_samples <= 0 or cfg.max_metric_samples <= 0:
             raise ValueError("evaluation num_samples and max_metric_samples must be positive.")
         if cfg.num_sliced_projections <= 0:
@@ -482,6 +547,21 @@ class EvaluationConfig:
         if cfg.plot_dir1 < 0 or cfg.plot_dir2 < 0:
             raise ValueError("evaluation plot directions must be nonnegative indices.")
         return cfg
+
+
+def _parse_axis_limit(value: Any, name: str) -> List[float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"{name} must be a two-item list [min, max].")
+    if isinstance(value[0], bool) or isinstance(value[1], bool):
+        raise TypeError(f"{name} values must be numeric.")
+    try:
+        low = float(value[0])
+        high = float(value[1])
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} values must be numeric.") from exc
+    if (low, high) != (0.0, 0.0) and not low < high:
+        raise ValueError(f"{name} must be [0.0, 0.0] for auto limits or satisfy min < max.")
+    return [low, high]
 
 
 @dataclass(frozen=True)

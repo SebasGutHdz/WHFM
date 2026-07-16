@@ -51,6 +51,14 @@ class DirectionState:
         if self.scheduler is not None:
             self.scheduler.step()
 
+    def reset_optimization(
+        self,
+        optimizer: torch.optim.Optimizer,
+        scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
+    ) -> None:
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+
     def state_dict(self):
         return {
             "direction": self.direction.value,

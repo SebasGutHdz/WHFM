@@ -18,12 +18,12 @@ model:
 
 initial_fit:
   coupling: ot
-  epochs: 250
+  epochs: 2
   steps_per_batch: 1
   noise_std: 1.0e-4
 
 rectification:
-  num_rectifications: 10
+  num_rectifications: 9
   direction_order: [forward]
   coupling_generation: own_ema
   steps_per_batch: 64
@@ -31,17 +31,21 @@ rectification:
 
 node_solver:
   method: euler
-  node_steps: 500
+  node_steps: 1000
 
 bridge_solver:
   kind: scipy
-  sigma: 1.0e-3
+  # sigma: 1.0e-3
+  # For asymmetric bridge std boundaries, replace sigma with:
+  sigma_source: 1.0e-3
+  sigma_target: 1.0e-5
   bridge_steps: 30
   tol: 1.0e-2
   max_nodes: 200
   quadrature_order: 3
   use_monte_carlo: true
-  monte_carlo_samples: 10
+  monte_carlo_samples: 10 # Recommend at least 10
+  num_workers: 16
   failure_policy: skip_pair
 
 optimization:

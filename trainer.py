@@ -92,13 +92,15 @@ class HamiltonianTrainer:
         self.rectification_coupler = Coupler("ot")
         self.bridge_solver = GaussianBridgeSolver(
             self.problem.potential,
-            sigma=train_config.bridge_solver.sigma,
+            sigma_source=train_config.bridge_solver.sigma_source,
+            sigma_target=train_config.bridge_solver.sigma_target,
             bridge_steps=train_config.bridge_solver.bridge_steps,
             tol=train_config.bridge_solver.tol,
             max_nodes=train_config.bridge_solver.max_nodes,
             quadrature_order=train_config.bridge_solver.quadrature_order,
             use_monte_carlo=train_config.bridge_solver.use_monte_carlo,
             monte_carlo_samples=train_config.bridge_solver.monte_carlo_samples,
+            num_workers=train_config.bridge_solver.num_workers,
             failure_policy=train_config.bridge_solver.failure_policy,
         )
 
@@ -168,9 +170,10 @@ class HamiltonianTrainer:
 
     def run_rectifications(self) -> None:
         rect_cfg = self.train_config.rectification
-       
+
         for rectification_index in range(rect_cfg.num_rectifications):
             print(f"Running rectification {rectification_index}")
+            self._reset_rectification_optimization()
             for direction_name in rect_cfg.direction_order:
                 direction = Direction(direction_name)
                 if direction not in self.states:
@@ -534,6 +537,37 @@ class HamiltonianTrainer:
             json.dump(self.metrics, handle, indent=2)
         return path
 
+    def _reset_rectification_optimization(self) -> None:
+        rect_cfg = self.train_config.rectification
+        active_directions = tuple(
+            dict.fromkeys(Direction(name) for name in rect_cfg.direction_order)
+        )
+        for direction in active_directions:
+            if direction not in self.states:
+                continue
+            state = self.states[direction]
+            optimizer = self._make_optimizer(state.model)
+            scheduler = self._make_scheduler(
+                optimizer,
+                self._rectification_steps_for_direction(direction),
+            )
+            state.reset_optimization(optimizer, scheduler)
+
+    def _rectification_steps_for_direction(self, direction: Direction) -> int:
+        rect_cfg = self.train_config.rectification
+        rect_batches = self._num_batches(self.train_config.data.n_dataset)
+        rect_occurrences = sum(
+            1 for value in rect_cfg.direction_order if value == direction.value
+        )
+        return max(1, rect_batches * rect_occurrences * rect_cfg.steps_per_batch)
+
+    def _make_optimizer(self, model: torch.nn.Module) -> torch.optim.Optimizer:
+        return torch.optim.AdamW(
+            model.parameters(),
+            lr=self.train_config.optimization.learning_rate,
+            weight_decay=self.train_config.optimization.weight_decay,
+        )
+
     def _make_direction_state(self, direction: Direction) -> DirectionState:
         model = FourierTimeResidualMLP(
             dim=self.problem.dimension,
@@ -543,11 +577,7 @@ class HamiltonianTrainer:
             m=self.train_config.model.fourier_modes,
             time_varying=True,
         ).to(device=self.device, dtype=self.dtype)
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=self.train_config.optimization.learning_rate,
-            weight_decay=self.train_config.optimization.weight_decay,
-        )
+        optimizer = self._make_optimizer(model)
         scheduler = self._make_scheduler(optimizer, self.total_steps_by_direction[direction])
         return DirectionState(
             direction=direction,

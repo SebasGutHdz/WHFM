@@ -28,7 +28,7 @@ functional:
     parameters:
       fixed_position: [0.0, 0.0]
       G: 100.0
-      central_mass: 1.0
+      central_mass: 5.0
       moving_mass: 100.0
       epsilon: 0.01
       n_moving: 2
@@ -37,9 +37,12 @@ functional:
   interaction: null
 evaluation:
   num_samples: 3000
-  max_metric_samples: 512
+  max_metric_samples: 1000
   num_sliced_projections: 128
   mmd_bandwidth: null
   plot_trajectory_count: 512
   plot_dir1: 0
   plot_dir2: 1
+  plot_xlim: [-14.0, 7.0]
+  plot_ylim: [-14.0, 7.0]
+  xaxis_hist: 0.4

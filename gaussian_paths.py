@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from concurrent.futures import ProcessPoolExecutor
 from typing import Dict, Tuple
+import pickle
 import time
 
 import numpy as np
 import torch
 from torch import Tensor
 
-from .solvers import (
-    make_double_well_gaussian_bvp_rhs,
-    make_particle_bvp_rhs,
-    scipy_solve_bvp,
-)
+from .solvers import make_particle_bvp_rhs, scipy_solve_bvp
 
 
 def _time_column(t, x: Tensor) -> Tensor:
@@ -44,6 +42,208 @@ def _pair_key(x0: Tensor, x1: Tensor):
     return left, right
 
 
+def _mean_std_bvp_worker_init():
+    try:
+        torch.set_num_threads(1)
+    except RuntimeError:
+        pass
+
+
+def _interpolate_reference_samples_numpy(
+    t,
+    n_mesh: int,
+    reference_t_grid: np.ndarray,
+    reference_samples: np.ndarray,
+):
+    t_flat = np.asarray(t, dtype=float).reshape(-1)
+    if t_flat.size == 1 and n_mesh != 1:
+        t_flat = np.full(n_mesh, float(t_flat[0]), dtype=float)
+    if t_flat.size != n_mesh:
+        raise ValueError(
+            f"RHS time array has {t_flat.size} entries, but state has {n_mesh} mesh columns."
+        )
+
+    t_flat = np.clip(t_flat, reference_t_grid[0], reference_t_grid[-1])
+    right = np.searchsorted(reference_t_grid, t_flat, side="left")
+    right = np.clip(right, 1, reference_t_grid.size - 1)
+    left = right - 1
+    denom = np.maximum(reference_t_grid[right] - reference_t_grid[left], 1e-12)
+    weight = ((t_flat - reference_t_grid[left]) / denom).reshape(-1, 1, 1)
+    return reference_samples[left] + weight * (
+        reference_samples[right] - reference_samples[left]
+    )
+
+
+def _make_mean_std_bvp_rhs(
+    potential,
+    dim: int,
+    eps: np.ndarray,
+    weights: np.ndarray,
+    *,
+    interaction_potential=None,
+    interaction_coefficient: float = 1.0,
+    reference_t_grid=None,
+    reference_samples=None,
+):
+    q = eps.shape[0]
+    has_interaction = interaction_potential is not None
+    if has_interaction and (reference_t_grid is None or reference_samples is None):
+        raise RuntimeError(
+            "Interaction RHS requires frozen reference samples. Call batch_solve "
+            "or pass reference_t_grid/reference_samples to _make_rhs."
+        )
+    linear_gradient = getattr(potential, "linear_gradient", None)
+    if linear_gradient is None:
+        linear_gradient = potential.gradient
+
+    def rhs(_t, state):
+        n_mesh = state.shape[1]
+        mu = state[:dim].T
+        mu_dot = state[dim : 2 * dim]
+        sigma = state[2 * dim]
+        sigma_dot = state[2 * dim + 1]
+
+        x_quad = mu[:, None, :] + sigma[:, None, None] * eps[None, :, :]
+        x_quad_t = torch.as_tensor(x_quad.reshape(-1, dim), dtype=torch.float64)
+        grad = linear_gradient(x_quad_t).detach().cpu().numpy().reshape(n_mesh, q, dim)
+
+        mean_grad = -np.sum(weights[None, :, None] * grad, axis=1)
+        sigma_accel = -np.sum(
+            weights[None, :] * np.sum(grad * eps[None, :, :], axis=-1),
+            axis=1,
+        ) / dim
+
+        if has_interaction:
+            y_ref = _interpolate_reference_samples_numpy(
+                _t, n_mesh, reference_t_grid, reference_samples
+            )
+            interaction_x = np.broadcast_to(
+                x_quad[:, :, None, :],
+                (n_mesh, q, y_ref.shape[1], dim),
+            )
+            interaction_y = np.broadcast_to(
+                y_ref[:, None, :, :],
+                (n_mesh, q, y_ref.shape[1], dim),
+            )
+            interaction_x_t = torch.as_tensor(
+                np.array(interaction_x.reshape(-1, dim), copy=True), dtype=torch.float64
+            )
+            interaction_y_t = torch.as_tensor(
+                np.array(interaction_y.reshape(-1, dim), copy=True), dtype=torch.float64
+            )
+            interaction_grad = (
+                interaction_potential.interaction_gradient(interaction_x_t, interaction_y_t)
+                .detach()
+                .cpu()
+                .numpy()
+                .reshape(n_mesh, q, y_ref.shape[1], dim)
+            )
+            interaction_mean_grad = interaction_grad.mean(axis=2)
+            interaction_mu_accel = np.sum(
+                weights[None, :, None] * interaction_mean_grad,
+                axis=1,
+            )
+            interaction_sigma_accel = np.sum(
+                weights[None, :]
+                * np.sum(interaction_mean_grad * eps[None, :, :], axis=-1),
+                axis=1,
+            ) / dim
+            mean_grad = mean_grad - interaction_coefficient * interaction_mu_accel
+            sigma_accel = sigma_accel - interaction_coefficient * interaction_sigma_accel
+
+        return np.vstack(
+            [mu_dot, mean_grad.T, sigma_dot.reshape(1, -1), sigma_accel.reshape(1, -1)]
+        )
+
+    return rhs
+
+
+def _solve_mean_std_bvp_pair(job):
+    dim = int(job["dim"])
+    start = job["start"]
+    end = job["end"]
+    sigma_source = float(job["sigma_source"])
+    sigma_target = float(job["sigma_target"])
+    grid = job["grid"]
+    guess = job["guess"]
+
+    def bc(ya, yb):
+        return np.concatenate(
+            [
+                ya[:dim] - start,
+                yb[:dim] - end,
+                np.asarray([
+                    ya[2 * dim] - sigma_source,
+                    yb[2 * dim] - sigma_target,
+                ]),
+            ]
+        )
+
+    rhs = _make_mean_std_bvp_rhs(
+        job["potential"],
+        dim,
+        job["eps"],
+        job["weights"],
+        interaction_potential=job["interaction_potential"],
+        interaction_coefficient=job["interaction_coefficient"],
+        reference_t_grid=job["reference_t_grid"],
+        reference_samples=job["reference_samples"],
+    )
+
+    solve_start = time.perf_counter()
+    try:
+        result = scipy_solve_bvp(
+            rhs,
+            bc,
+            grid,
+            guess,
+            tol=job["tol"],
+            max_nodes=job["max_nodes"],
+            to_tensor=False,
+        )
+        solve_time = time.perf_counter() - solve_start
+        iterations = getattr(result.raw, "niter", None)
+        if iterations is not None:
+            iterations = int(iterations)
+        mesh_nodes = int(np.asarray(getattr(result.raw, "x", grid)).size)
+        if not result.success:
+            return {
+                "index": job["index"],
+                "state": None,
+                "failure_message": result.message,
+                "solve_time": solve_time,
+                "iterations": iterations,
+                "mesh_nodes": mesh_nodes,
+            }
+        state = result.raw.sol(grid).T
+        if np.any(state[:, 2 * dim] <= 0):
+            return {
+                "index": job["index"],
+                "state": None,
+                "failure_message": "SciPy mean/std BVP returned a nonpositive sigma path.",
+                "solve_time": solve_time,
+                "iterations": iterations,
+                "mesh_nodes": mesh_nodes,
+            }
+        return {
+            "index": job["index"],
+            "state": state,
+            "failure_message": None,
+            "solve_time": solve_time,
+            "iterations": iterations,
+            "mesh_nodes": mesh_nodes,
+        }
+    except Exception as exc:
+        return {
+            "index": job["index"],
+            "state": None,
+            "failure_message": f"{type(exc).__name__}: {exc}",
+            "solve_time": time.perf_counter() - solve_start,
+            "iterations": None,
+            "mesh_nodes": None,
+        }
+
+
 class GaussianPath(ABC):
     """Base class for Gaussian path interpolants."""
 
@@ -62,136 +262,6 @@ class GaussianPath(ABC):
         sigma_t = _sigma_like_x(sigma_t, xt)
         sigma_t_prime = _sigma_like_x(sigma_t_prime, xt)
         return sigma_t_prime * (xt - mu_t) / (sigma_t + 1e-8) + mu_t_prime
-
-
-class HarmonicGaussianPath(GaussianPath):
-    """Closed-form harmonic Gaussian path."""
-
-    def __init__(self, U: Tensor, sigma: float = 0.5):
-        U = torch.as_tensor(U, dtype=torch.get_default_dtype())
-        self.U = U
-        self.D, self.Q = torch.linalg.eigh(U, UPLO="U")
-        self.sigma = sigma
-        self.sqrt_trace_U = torch.sqrt(torch.trace(U))
-
-    def compute(self, x0: Tensor, x1: Tensor, t: Tensor, return_derivatives: bool = True):
-        original_shape = x0.shape
-        x0_flat = x0.reshape(x0.shape[0], -1)
-        x1_flat = x1.reshape(x1.shape[0], -1)
-        t_col = _time_column(t, x0_flat)
-
-        D = self.D.to(device=x0.device, dtype=x0.dtype)
-        Q = self.Q.to(device=x0.device, dtype=x0.dtype)
-        sqrt_D = torch.sqrt(D.clamp_min(0.0))
-        D_t = sqrt_D * t_col
-
-        cos_D_t = torch.diag_embed(torch.cos(D_t))
-        sin_D_t = torch.diag_embed(torch.sin(D_t))
-        cos_D_1 = torch.diag(torch.cos(sqrt_D))
-        inv_sin_D_1 = torch.diag(1.0 / (torch.sin(sqrt_D) + 1e-8))
-        sqrt_D_mat = torch.diag(sqrt_D)
-
-        x0_v = x0_flat.unsqueeze(-1)
-        x1_v = x1_flat.unsqueeze(-1)
-        qtx0 = Q.T @ x0_v
-        qtx1 = Q.T @ x1_v
-        endpoint_term = -cos_D_1 @ qtx0 + qtx1
-
-        mu = (Q @ (cos_D_t @ qtx0 + sin_D_t @ inv_sin_D_1 @ endpoint_term)).squeeze(-1)
-        mu = mu.reshape(original_shape)
-
-        sqrt_trace = self.sqrt_trace_U.to(device=x0.device, dtype=x0.dtype)
-        sigma_value = torch.as_tensor(self.sigma, dtype=x0.dtype, device=x0.device)
-        coeff = (1.0 - torch.cos(sqrt_trace)) / (torch.sin(sqrt_trace) + 1e-8)
-        sigma_t = sigma_value * (torch.cos(sqrt_trace * t_col) + torch.sin(sqrt_trace * t_col) * coeff)
-
-        if not return_derivatives:
-            return mu, sigma_t
-
-        mu_prime = (
-            Q
-            @ sqrt_D_mat
-            @ (-sin_D_t @ qtx0 + cos_D_t @ inv_sin_D_1 @ endpoint_term)
-        ).squeeze(-1)
-        mu_prime = mu_prime.reshape(original_shape)
-        sigma_t_prime = sigma_value * sqrt_trace * (
-            -torch.sin(sqrt_trace * t_col) + torch.cos(sqrt_trace * t_col) * coeff
-        )
-        return mu, mu_prime, sigma_t, sigma_t_prime
-
-
-class HillGaussianPath(GaussianPath):
-    """Closed-form Gaussian path for the hill potential."""
-
-    def __init__(self, alpha: float = 3.0, sigma: float = 0.01):
-        self.alpha = alpha
-        self.sigma = sigma
-
-    def compute(self, x0: Tensor, x1: Tensor, t: Tensor, return_derivatives: bool = True):
-        t_x = _time_like_x(t, x0)
-        t_col = _time_column(t, x0)
-        alpha = torch.as_tensor(self.alpha, dtype=x0.dtype, device=x0.device)
-        root = torch.sqrt(alpha)
-        exp_root = torch.exp(root)
-        exp_neg_root = torch.exp(-root)
-        const_mu = 1.0 / (exp_root - exp_neg_root)
-
-        a = -x0 * exp_neg_root + x1
-        b = x0 * exp_root - x1
-        mu = const_mu * (torch.exp(root * t_x) * a + torch.exp(-root * t_x) * b)
-
-        root_sigma = torch.sqrt(2.0 * alpha)
-        sigma_value = torch.as_tensor(self.sigma, dtype=x0.dtype, device=x0.device)
-        const_1 = sigma_value / (torch.exp(root_sigma) - torch.exp(-root_sigma))
-        const_2 = 1.0 - torch.exp(-root_sigma)
-        const_3 = torch.exp(root_sigma) - 1.0
-        sigma_t = const_1 * (
-            const_2 * torch.exp(root_sigma * t_col)
-            + const_3 * torch.exp(-root_sigma * t_col)
-        )
-
-        if not return_derivatives:
-            return mu, sigma_t
-
-        mu_prime = root * const_mu * (torch.exp(root * t_x) * a - torch.exp(-root * t_x) * b)
-        sigma_t_prime = const_1 * root_sigma * (
-            const_2 * torch.exp(root_sigma * t_col)
-            - const_3 * torch.exp(-root_sigma * t_col)
-        )
-        return mu, mu_prime, sigma_t, sigma_t_prime
-
-
-class DensityGaussianPath(GaussianPath):
-    """Linear-mean path with a precomputed sigma schedule."""
-
-    def __init__(
-        self,
-        potential,
-        sigma_0,
-        sigma_dot_0=None,
-        *,
-        n_steps: int = 200,
-        method: str = "scipy",
-    ):
-        self.potential = potential
-        self.schedule = potential.compute_sigma_schedule(
-            sigma_0, sigma_dot_0, n_steps=n_steps, method=method
-        )
-
-    def compute(self, x0: Tensor, x1: Tensor, t: Tensor, return_derivatives: bool = True):
-        t_x = _time_like_x(t, x0)
-        mu = (1.0 - t_x) * x0 + t_x * x1
-        sigma_t, sigma_t_prime = self.schedule.to(device=x0.device, dtype=x0.dtype).evaluate(
-            _time_column(t, x0)
-        )
-        if not return_derivatives:
-            return mu, sigma_t
-        mu_prime = x1 - x0
-        return mu, mu_prime, sigma_t, sigma_t_prime
-
-
-class InteractionGaussianPath(DensityGaussianPath):
-    """Alias path for interaction-driven sigma schedules."""
 
 
 class _CachedBVPPath(GaussianPath):
@@ -281,71 +351,6 @@ class _CachedBVPPath(GaussianPath):
             states[torch.arange(states.shape[0], device=states.device), right]
             - states[torch.arange(states.shape[0], device=states.device), left]
         )
-
-
-class ParticleBVPGaussianPath(_CachedBVPPath):
-    """SciPy-BVP-backed particle path ``[x, v]``."""
-
-    def __init__(self, potential, sigma: float = 0.01, n_steps: int = 50, tol: float = 1e-4):
-        super().__init__(n_steps=n_steps, tol=tol)
-        self.potential = potential
-        self.sigma = sigma
-
-    def batch_solve(self, x0: Tensor, x1: Tensor) -> Tensor:
-        x0_cpu = x0.detach().cpu()
-        x1_cpu = x1.detach().cpu()
-        dim = x0_cpu.reshape(x0_cpu.shape[0], -1).shape[1]
-        grid = np.linspace(0.0, 1.0, self.n_steps + 1)
-        rhs = make_particle_bvp_rhs(self.potential)
-        states = []
-        success_indices = []
-        failure_messages = {}
-        for i, (start_t, end_t) in enumerate(
-            zip(x0_cpu.reshape(x0_cpu.shape[0], -1), x1_cpu.reshape(x1_cpu.shape[0], -1))
-        ):
-            start = start_t.numpy()
-            end = end_t.numpy()
-            guess_x = ((1.0 - grid[:, None]) * start + grid[:, None] * end).T
-            guess_v = np.repeat((end - start)[:, None], grid.size, axis=1)
-            guess = np.vstack([guess_x, guess_v])
-
-            def bc(ya, yb):
-                return np.concatenate([ya[:dim] - start, yb[:dim] - end])
-
-            result = scipy_solve_bvp(
-                rhs,
-                bc,
-                grid,
-                guess,
-                tol=self.tol,
-                max_nodes=self.max_nodes,
-                to_tensor=False,
-            )
-            if not result.success:
-                failure_messages[i] = result.message
-                continue
-            states.append(torch.as_tensor(result.raw.sol(grid).T, dtype=x0_cpu.dtype))
-            success_indices.append(i)
-
-        return self._store_successful_cache(
-            x0_cpu,
-            x1_cpu,
-            states,
-            success_indices,
-            failure_messages,
-            "SciPy particle BVP failed",
-        )
-
-    def compute(self, x0: Tensor, x1: Tensor, t: Tensor, return_derivatives: bool = True):
-        states = self._interpolate_states(self._lookup_states(x0, x1), t)
-        dim = x0.reshape(x0.shape[0], -1).shape[1]
-        mu = states[:, :dim].reshape_as(x0)
-        sigma_t = torch.full((_time_column(t, x0).shape[0], 1), self.sigma, dtype=x0.dtype, device=x0.device)
-        if not return_derivatives:
-            return mu, sigma_t
-        mu_prime = states[:, dim:].reshape_as(x0)
-        sigma_t_prime = torch.zeros_like(sigma_t)
-        return mu, mu_prime, sigma_t, sigma_t_prime
 
 
 class DeterministicBVPPath(_CachedBVPPath):
@@ -497,7 +502,9 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
     def __init__(
         self,
         potential,
-        sigma: float = 1e-3,
+        sigma: float | None = 1e-3,
+        sigma_source: float | None = None,
+        sigma_target: float | None = None,
         n_steps: int = 30,
         tol: float = 1e-3,
         max_nodes: int = 1000,
@@ -512,9 +519,24 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
         n_reference_grid: int = None,
         use_monte_carlo: bool = False,
         monte_carlo_samples: int = 100,
+        num_workers: int = 1,
     ):
-        if sigma <= 0:
-            raise ValueError("sigma must be positive. Use DeterministicBVPPath for sigma=0.")
+        if (sigma_source is None) != (sigma_target is None):
+            raise ValueError("sigma_source and sigma_target must be provided together.")
+        if sigma_source is None:
+            if sigma is None:
+                raise ValueError("sigma or both sigma_source and sigma_target must be provided.")
+            sigma_value = float(sigma)
+            sigma_source = sigma_value
+            sigma_target = sigma_value
+        else:
+            sigma_value = None if sigma is None else float(sigma)
+            sigma_source = float(sigma_source)
+            sigma_target = float(sigma_target)
+        if sigma_source <= 0 or sigma_target <= 0:
+            raise ValueError(
+                "sigma endpoints must be positive. Use DeterministicBVPPath for sigma=0."
+            )
         if quadrature_order < 1:
             raise ValueError("quadrature_order must be positive.")
         if n_density_samples < 1:
@@ -523,14 +545,19 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
             raise ValueError("n_reference_grid must be at least 2.")
         if monte_carlo_samples < 1:
             raise ValueError("monte_carlo_samples must be positive.")
+        if num_workers < 0:
+            raise ValueError("num_workers must be nonnegative.")
         super().__init__(n_steps=n_steps, tol=tol, max_nodes=max_nodes)
         self.potential = potential
-        self.sigma = float(sigma)
+        self.sigma = sigma_value
+        self.sigma_source = sigma_source
+        self.sigma_target = sigma_target
         self.quadrature_order = int(quadrature_order)
         self.n_density_samples = int(n_density_samples)
         self.n_reference_grid = n_reference_grid
         self.use_monte_carlo = bool(use_monte_carlo)
         self.monte_carlo_samples = int(monte_carlo_samples)
+        self.num_workers = int(num_workers)
         self._monte_carlo_rules = {}
         self.mu_guess = mu_guess
         self.mu_dot_guess = mu_dot_guess
@@ -722,80 +749,96 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
 
     def _make_rhs(self, dim: int, reference_t_grid=None, reference_samples=None):
         eps, weights = self._normal_integration_rule(dim)
-        q = eps.shape[0]
         has_interaction = self.interaction_potential is not None
         if has_interaction and (reference_t_grid is None or reference_samples is None):
             reference_t_grid = self.reference_t_grid
             reference_samples = self.reference_samples
-        if has_interaction and (reference_t_grid is None or reference_samples is None):
-            raise RuntimeError(
-                "Interaction RHS requires frozen reference samples. Call batch_solve "
-                "or pass reference_t_grid/reference_samples to _make_rhs."
+        return _make_mean_std_bvp_rhs(
+            self.potential,
+            dim,
+            eps,
+            weights,
+            interaction_potential=self.interaction_potential,
+            interaction_coefficient=self.interaction_coefficient,
+            reference_t_grid=reference_t_grid,
+            reference_samples=reference_samples,
+        )
+
+    def _build_pair_solve_jobs(
+        self,
+        x0_flat: Tensor,
+        x1_flat: Tensor,
+        grid: np.ndarray,
+        solve_mu_guess: np.ndarray,
+        solve_mu_dot_guess: np.ndarray,
+        solve_sigma_guess: np.ndarray,
+        solve_sigma_dot_guess: np.ndarray,
+        reference_t_grid,
+        reference_samples,
+    ):
+        _, dim = x0_flat.shape
+        eps, weights = self._normal_integration_rule(dim)
+        common = {
+            "dim": dim,
+            "grid": grid,
+            "sigma_source": self.sigma_source,
+            "sigma_target": self.sigma_target,
+            "tol": self.tol,
+            "max_nodes": self.max_nodes,
+            "potential": self.potential,
+            "eps": eps,
+            "weights": weights,
+            "interaction_potential": self.interaction_potential,
+            "interaction_coefficient": self.interaction_coefficient,
+            "reference_t_grid": reference_t_grid,
+            "reference_samples": reference_samples,
+        }
+        jobs = []
+        for i, (start_t, end_t) in enumerate(zip(x0_flat, x1_flat)):
+            guess = np.vstack(
+                [
+                    solve_mu_guess[i].T,
+                    solve_mu_dot_guess[i].T,
+                    solve_sigma_guess[i].reshape(1, -1),
+                    solve_sigma_dot_guess[i].reshape(1, -1),
+                ]
             )
-        linear_gradient = getattr(self.potential, "linear_gradient", None)
-        if linear_gradient is None:
-            linear_gradient = self.potential.gradient
-
-        def rhs(_t, state):
-            n_mesh = state.shape[1]
-            mu = state[:dim].T
-            mu_dot = state[dim : 2 * dim]
-            sigma = state[2 * dim]
-            sigma_dot = state[2 * dim + 1]
-
-            x_quad = mu[:, None, :] + sigma[:, None, None] * eps[None, :, :]
-            x_quad_t = torch.as_tensor(x_quad.reshape(-1, dim), dtype=torch.float64)
-            grad = linear_gradient(x_quad_t).detach().cpu().numpy().reshape(n_mesh, q, dim)
-
-            mean_grad = -np.sum(weights[None, :, None] * grad, axis=1)
-            sigma_accel = -np.sum(
-                weights[None, :] * np.sum(grad * eps[None, :, :], axis=-1),
-                axis=1,
-            ) / dim
-
-            if has_interaction:
-                y_ref = self._interpolate_reference_samples(
-                    _t, n_mesh, reference_t_grid, reference_samples
-                )
-                interaction_x = np.broadcast_to(
-                    x_quad[:, :, None, :],
-                    (n_mesh, q, y_ref.shape[1], dim),
-                )
-                interaction_y = np.broadcast_to(
-                    y_ref[:, None, :, :],
-                    (n_mesh, q, y_ref.shape[1], dim),
-                )
-                interaction_x_t = torch.as_tensor(
-                    np.array(interaction_x.reshape(-1, dim), copy=True), dtype=torch.float64
-                )
-                interaction_y_t = torch.as_tensor(
-                    np.array(interaction_y.reshape(-1, dim), copy=True), dtype=torch.float64
-                )
-                interaction_grad = (
-                    self.interaction_potential.interaction_gradient(interaction_x_t, interaction_y_t)
-                    .detach()
-                    .cpu()
-                    .numpy()
-                    .reshape(n_mesh, q, y_ref.shape[1], dim)
-                )
-                interaction_mean_grad = interaction_grad.mean(axis=2)
-                interaction_mu_accel = np.sum(
-                    weights[None, :, None] * interaction_mean_grad,
-                    axis=1,
-                )
-                interaction_sigma_accel = np.sum(
-                    weights[None, :]
-                    * np.sum(interaction_mean_grad * eps[None, :, :], axis=-1),
-                    axis=1,
-                ) / dim
-                mean_grad = mean_grad - self.interaction_coefficient * interaction_mu_accel
-                sigma_accel = sigma_accel - self.interaction_coefficient * interaction_sigma_accel
-
-            return np.vstack(
-                [mu_dot, mean_grad.T, sigma_dot.reshape(1, -1), sigma_accel.reshape(1, -1)]
+            job = dict(common)
+            job.update(
+                {
+                    "index": i,
+                    "start": start_t.numpy(),
+                    "end": end_t.numpy(),
+                    "guess": guess,
+                }
             )
+            jobs.append(job)
+        return jobs
 
-        return rhs
+    def _solve_pair_jobs(self, jobs):
+        if self.num_workers <= 1 or len(jobs) <= 1:
+            return [_solve_mean_std_bvp_pair(job) for job in jobs]
+
+        try:
+            pickle.dumps((self.potential, self.interaction_potential))
+        except Exception as exc:
+            raise ValueError(
+                "Parallel SciPy BVP solves require picklable potential objects; "
+                "set bridge_solver.num_workers: 1 to use the serial solver."
+            ) from exc
+
+        max_workers = min(self.num_workers, len(jobs))
+        try:
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=_mean_std_bvp_worker_init,
+            ) as executor:
+                return list(executor.map(_solve_mean_std_bvp_pair, jobs))
+        except Exception as exc:
+            raise ValueError(
+                "Parallel SciPy BVP solve failed; ensure the potential is picklable "
+                "or set bridge_solver.num_workers: 1."
+            ) from exc
 
     def batch_solve(self, x0: Tensor, x1: Tensor) -> Tensor:
         x0_cpu = x0.detach().cpu()
@@ -823,8 +866,9 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
         default_mu_dot = np.repeat(
             (x1_flat - x0_flat).numpy()[:, None, :], grid.size, axis=1
         )
-        default_sigma = np.full((n_pairs, grid.size), self.sigma)
-        default_sigma_dot = np.zeros((n_pairs, grid.size))
+        default_sigma_line = np.linspace(self.sigma_source, self.sigma_target, grid.size)
+        default_sigma = np.broadcast_to(default_sigma_line[None, :], (n_pairs, grid.size)).copy()
+        default_sigma_dot = np.full((n_pairs, grid.size), self.sigma_target - self.sigma_source)
 
         solve_mu_guess = default_mu if mu_guess is None else mu_guess
         solve_mu_dot_guess = default_mu_dot if mu_dot_guess is None else mu_dot_guess
@@ -840,9 +884,21 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
                 solve_sigma_guess,
                 solve_sigma_dot_guess,
             )
-            rhs = self._make_rhs(dim, reference_t_grid, reference_samples)
         else:
-            rhs = self._make_rhs(dim)
+            reference_t_grid = None
+            reference_samples = None
+
+        jobs = self._build_pair_solve_jobs(
+            x0_flat,
+            x1_flat,
+            grid,
+            solve_mu_guess,
+            solve_mu_dot_guess,
+            solve_sigma_guess,
+            solve_sigma_dot_guess,
+            reference_t_grid,
+            reference_samples,
+        )
 
         states = []
         success_indices = []
@@ -851,55 +907,16 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
         pair_solve_times = [float("nan")] * n_pairs
         pair_solver_iterations = [None] * n_pairs
         pair_solver_mesh_nodes = [None] * n_pairs
-        for i, (start_t, end_t) in enumerate(zip(x0_flat, x1_flat)):
-            start = start_t.numpy()
-            end = end_t.numpy()
-
-            guess_mu = solve_mu_guess[i]
-            guess_mu_dot = solve_mu_dot_guess[i]
-            guess_sigma = solve_sigma_guess[i]
-            guess_sigma_dot = solve_sigma_dot_guess[i]
-            guess = np.vstack(
-                [
-                    guess_mu.T,
-                    guess_mu_dot.T,
-                    guess_sigma.reshape(1, -1),
-                    guess_sigma_dot.reshape(1, -1),
-                ]
-            )
-
-            def bc(ya, yb):
-                return np.concatenate(
-                    [
-                        ya[:dim] - start,
-                        yb[:dim] - end,
-                        np.asarray([ya[2 * dim] - self.sigma, yb[2 * dim] - self.sigma]),
-                    ]
-                )
-
-            solve_start = time.perf_counter()
-            result = scipy_solve_bvp(
-                rhs,
-                bc,
-                grid,
-                guess,
-                tol=self.tol,
-                max_nodes=self.max_nodes,
-                to_tensor=False,
-            )
-            pair_solve_times[i] = time.perf_counter() - solve_start
-            pair_solver_iterations[i] = getattr(result.raw, "niter", None)
-            if pair_solver_iterations[i] is not None:
-                pair_solver_iterations[i] = int(pair_solver_iterations[i])
-            pair_solver_mesh_nodes[i] = int(np.asarray(getattr(result.raw, "x", grid)).size)
-            if not result.success:
-                failure_messages[i] = result.message
+        pair_results = sorted(self._solve_pair_jobs(jobs), key=lambda item: item["index"])
+        for pair_result in pair_results:
+            i = int(pair_result["index"])
+            pair_solve_times[i] = pair_result["solve_time"]
+            pair_solver_iterations[i] = pair_result["iterations"]
+            pair_solver_mesh_nodes[i] = pair_result["mesh_nodes"]
+            if pair_result["failure_message"] is not None:
+                failure_messages[i] = pair_result["failure_message"]
                 continue
-            state = torch.as_tensor(result.raw.sol(grid).T, dtype=x0_cpu.dtype)
-            if torch.any(state[:, 2 * dim] <= 0):
-                failure_messages[i] = "SciPy mean/std BVP returned a nonpositive sigma path."
-                continue
-            states.append(state)
+            states.append(torch.as_tensor(pair_result["state"], dtype=x0_cpu.dtype))
             success_indices.append(i)
 
         solve_metadata = {
@@ -929,59 +946,4 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
             return mu, sigma_t
         mu_prime = states[:, dim : 2 * dim].reshape_as(x0)
         sigma_t_prime = states[:, 2 * dim + 1 : 2 * dim + 2]
-        return mu, mu_prime, sigma_t, sigma_t_prime
-
-
-class ParametricBVPGaussianPath(_CachedBVPPath):
-    """SciPy-BVP-backed 1D Gaussian-parametric path ``[mu, mu', sigma, sigma']``."""
-
-    def __init__(self, potential, sigma: float = 1e-4, n_steps: int = 30, tol: float = 1.0):
-        super().__init__(n_steps=n_steps, tol=tol)
-        self.potential = potential
-        self.sigma = sigma
-
-    def batch_solve(self, x0: Tensor, x1: Tensor) -> Tensor:
-        x0_cpu = x0.detach().cpu().reshape(x0.shape[0], -1)
-        x1_cpu = x1.detach().cpu().reshape(x1.shape[0], -1)
-        if x0_cpu.shape[1] != 1:
-            raise ValueError("ParametricBVPGaussianPath currently supports 1D endpoints only.")
-        grid = np.linspace(0.0, 1.0, self.n_steps + 1)
-        rhs = make_double_well_gaussian_bvp_rhs(self.potential)
-        states = []
-        for start_t, end_t in zip(x0_cpu, x1_cpu):
-            start = float(start_t[0])
-            end = float(end_t[0])
-            mu_guess = (1.0 - grid) * start + grid * end
-            mu_prime_guess = np.full_like(grid, end - start)
-            sigma_guess = np.full_like(grid, self.sigma)
-            sigma_prime_guess = np.zeros_like(grid)
-            guess = np.vstack([mu_guess, mu_prime_guess, sigma_guess, sigma_prime_guess])
-
-            def bc(ya, yb):
-                return np.asarray([ya[0] - start, ya[2] - self.sigma, yb[0] - end, yb[2] - self.sigma])
-
-            result = scipy_solve_bvp(
-                rhs,
-                bc,
-                grid,
-                guess,
-                tol=self.tol,
-                max_nodes=self.max_nodes,
-                to_tensor=False,
-            )
-            if not result.success:
-                raise RuntimeError(f"SciPy parametric BVP failed: {result.message}")
-            states.append(torch.as_tensor(result.raw.sol(grid).T, dtype=x0_cpu.dtype))
-        states_t = torch.stack(states, dim=0)
-        self._store_cache(x0.detach().cpu(), x1.detach().cpu(), states_t)
-        return states_t
-
-    def compute(self, x0: Tensor, x1: Tensor, t: Tensor, return_derivatives: bool = True):
-        states = self._interpolate_states(self._lookup_states(x0, x1), t)
-        mu = states[:, 0:1].reshape_as(x0)
-        sigma_t = states[:, 2:3].abs()
-        if not return_derivatives:
-            return mu, sigma_t
-        mu_prime = states[:, 1:2].reshape_as(x0)
-        sigma_t_prime = states[:, 3:4].abs()
         return mu, mu_prime, sigma_t, sigma_t_prime

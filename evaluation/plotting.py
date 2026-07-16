@@ -13,12 +13,99 @@ from torch import Tensor
 
 TIME_COLORMAP = "autumn"
 POTENTIAL_COLORMAP = "viridis"
+PUBLICATION_FIGSIZE = (7.2, 5.8)
+PUBLICATION_SQUARE_FIGSIZE = (7.2, 7.2)
+PUBLICATION_HIST_FIGSIZE = (7.2, 4.8)
+PUBLICATION_GIF_FIGSIZE = (8.6, 8.6)
+PUBLICATION_DPI = 300
+PUBLICATION_FONT_SIZE = 15
+PUBLICATION_AXIS_LABEL_SIZE = 18
+PUBLICATION_TITLE_SIZE = 18
+PUBLICATION_LEGEND_SIZE = 14
+PUBLICATION_COLORBAR_LABEL_SIZE = 17
+PUBLICATION_TICK_SIZE = 15
+PUBLICATION_SPINE_WIDTH = 1.25
+PUBLICATION_TICK_WIDTH = 1.2
+PUBLICATION_LINE_WIDTH = 1.6
+PUBLICATION_TRAJECTORY_MARKER_SIZE = 5
+PUBLICATION_TERMINAL_MARKER_SIZE = 10
+PUBLICATION_GIF_STATIC_MARKER_SIZE = 18
+PUBLICATION_GIF_CURRENT_MARKER_SIZE = 56
 
 
 @dataclass(frozen=True)
 class _ParticlePlotDescriptor:
     n_particles: int
     particle_dim: int
+
+
+def _apply_publication_style(plt) -> None:
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "mathtext.fontset": "dejavuserif",
+            "font.size": PUBLICATION_FONT_SIZE,
+            "axes.labelsize": PUBLICATION_AXIS_LABEL_SIZE,
+            "axes.titlesize": PUBLICATION_TITLE_SIZE,
+            "xtick.labelsize": PUBLICATION_TICK_SIZE,
+            "ytick.labelsize": PUBLICATION_TICK_SIZE,
+            "legend.fontsize": PUBLICATION_LEGEND_SIZE,
+            "figure.dpi": PUBLICATION_DPI,
+            "savefig.dpi": PUBLICATION_DPI,
+            "axes.linewidth": PUBLICATION_SPINE_WIDTH,
+            "xtick.major.width": PUBLICATION_TICK_WIDTH,
+            "ytick.major.width": PUBLICATION_TICK_WIDTH,
+            "xtick.major.size": 5.5,
+            "ytick.major.size": 5.5,
+            "lines.linewidth": PUBLICATION_LINE_WIDTH,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    )
+
+
+def _publication_subplots(plt, *, figsize=PUBLICATION_FIGSIZE):
+    _apply_publication_style(plt)
+    return plt.subplots(figsize=figsize, constrained_layout=True)
+
+
+def _style_axis(ax, *, title: str | None = None) -> None:
+    if title is not None:
+        ax.set_title(title, fontsize=PUBLICATION_TITLE_SIZE, pad=10)
+    ax.xaxis.label.set_size(PUBLICATION_AXIS_LABEL_SIZE)
+    ax.yaxis.label.set_size(PUBLICATION_AXIS_LABEL_SIZE)
+    ax.tick_params(
+        axis="both",
+        which="major",
+        labelsize=PUBLICATION_TICK_SIZE,
+        width=PUBLICATION_TICK_WIDTH,
+        length=5.5,
+    )
+    for spine in ax.spines.values():
+        spine.set_linewidth(PUBLICATION_SPINE_WIDTH)
+
+
+def _style_legend(ax, *, loc: str = "best", markerscale: float = 1.4):
+    legend = ax.legend(
+        loc=loc,
+        markerscale=markerscale,
+        frameon=True,
+        framealpha=0.92,
+        borderpad=0.45,
+        handlelength=1.4,
+        handletextpad=0.5,
+        labelspacing=0.35,
+    )
+    if legend is not None:
+        legend.get_frame().set_linewidth(0.8)
+    return legend
+
+
+def _publication_colorbar(fig, ax, mappable, *, label: str):
+    colorbar = fig.colorbar(mappable, ax=ax)
+    colorbar.set_label(label, fontsize=PUBLICATION_COLORBAR_LABEL_SIZE)
+    colorbar.ax.tick_params(labelsize=PUBLICATION_TICK_SIZE, width=PUBLICATION_TICK_WIDTH, length=5.0)
+    return colorbar
 
 
 def _particle_plot_descriptor(potential, dim: int | None = None) -> _ParticlePlotDescriptor | None:
@@ -93,6 +180,38 @@ def _set_position_labels(ax, evaluation_config, descriptor: _ParticlePlotDescrip
     ax.set_ylabel(f"x{evaluation_config.plot_dir2}")
 
 
+def _axis_limit_from_config(evaluation_config, attr: str) -> tuple[float, float] | None:
+    values = getattr(evaluation_config, attr, [0.0, 0.0])
+    low = float(values[0])
+    high = float(values[1])
+    if low == 0.0 and high == 0.0:
+        return None
+    return low, high
+
+
+def _resolve_plot_domain(evaluation_config, low: Tensor, high: Tensor) -> tuple[Tensor, Tensor]:
+    resolved_low = low.clone()
+    resolved_high = high.clone()
+    xlim = _axis_limit_from_config(evaluation_config, "plot_xlim")
+    ylim = _axis_limit_from_config(evaluation_config, "plot_ylim")
+    if xlim is not None:
+        resolved_low[0] = xlim[0]
+        resolved_high[0] = xlim[1]
+    if ylim is not None:
+        resolved_low[1] = ylim[0]
+        resolved_high[1] = ylim[1]
+    return resolved_low, resolved_high
+
+
+def _apply_axis_limits(ax, evaluation_config) -> None:
+    xlim = _axis_limit_from_config(evaluation_config, "plot_xlim")
+    ylim = _axis_limit_from_config(evaluation_config, "plot_ylim")
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+
+
 def save_evaluation_plots(
     *,
     figures_dir: Path,
@@ -131,40 +250,43 @@ def save_evaluation_plots(
             c=time_values,
             cmap=cmap,
             norm=norm,
-            s=8,
+            s=PUBLICATION_TRAJECTORY_MARKER_SIZE,
             alpha=0.55,
             linewidths=0,
         )
         ax.autoscale()
         _set_position_labels(ax, evaluation_config, particle_descriptor)
+        _apply_axis_limits(ax, evaluation_config)
 
     def add_terminal_points(ax):
         ax.scatter(
             generated_plot[..., 0].reshape(-1),
             generated_plot[..., 1].reshape(-1),
-            s=12,
+            s=PUBLICATION_TERMINAL_MARKER_SIZE,
             alpha=0.75,
-            label="generated terminal",
+            label=r"$\tilde{\nu}$",
         )
         ax.scatter(
             reference_plot[..., 0].reshape(-1),
             reference_plot[..., 1].reshape(-1),
-            s=12,
+            s=PUBLICATION_TERMINAL_MARKER_SIZE,
             alpha=0.75,
-            label="target",
+            label=r"$\nu$",
         )
-        ax.legend(markerscale=1.5)
+        _style_legend(ax, markerscale=1.5)
         ax.autoscale()
+        _apply_axis_limits(ax, evaluation_config)
 
-    fig, ax = plt.subplots()
+    fig, ax = _publication_subplots(plt)
     add_time_scatter(ax)
     add_terminal_points(ax)
-    fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, label="t")
+    _publication_colorbar(fig, ax, plt.cm.ScalarMappable(norm=norm, cmap=cmap), label="t")
     trajectory_path = figures_dir / f"{tag}_trajectories.png"
-    fig.savefig(trajectory_path, bbox_inches="tight")
+    _style_axis(ax)
+    fig.savefig(trajectory_path, bbox_inches="tight", dpi=PUBLICATION_DPI)
     plt.close(fig)
 
-    fig, ax = plt.subplots()
+    fig, ax = _publication_subplots(plt)
     _plot_linear_contour(
         ax,
         potential,
@@ -174,12 +296,13 @@ def save_evaluation_plots(
     )
     add_time_scatter(ax)
     add_terminal_points(ax)
-    fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, label="t")
+    _publication_colorbar(fig, ax, plt.cm.ScalarMappable(norm=norm, cmap=cmap), label="t")
     contour_path = figures_dir / f"{tag}_linear_potential.png"
-    fig.savefig(contour_path, bbox_inches="tight")
+    _style_axis(ax)
+    fig.savefig(contour_path, bbox_inches="tight", dpi=PUBLICATION_DPI)
     plt.close(fig)
 
-    fig, ax = plt.subplots()
+    fig, ax = _publication_subplots(plt)
     _plot_linear_contour(
         ax,
         potential,
@@ -189,18 +312,23 @@ def save_evaluation_plots(
     )
     add_terminal_points(ax)
     _set_position_labels(ax, evaluation_config, particle_descriptor)
+    _apply_axis_limits(ax, evaluation_config)
     terminal_path = figures_dir / f"{tag}_terminal_scatter.png"
-    fig.savefig(terminal_path, bbox_inches="tight")
+    _style_axis(ax)
+    fig.savefig(terminal_path, bbox_inches="tight", dpi=PUBLICATION_DPI)
     plt.close(fig)
 
-    fig, ax = plt.subplots()
+    fig, ax = _publication_subplots(plt)
     drift_np = drift_samples.detach().cpu().numpy()
     ax.hist(drift_np, bins="auto", alpha=0.8)
+    ax.set_xlim(0,evaluation_config.xaxis_hist)
     ax.set_xlabel("Hamiltonian drift integral")
     ax.set_ylabel("count")
-    ax.set_title(tag)
+    rectf_num = tag[1]
+    ax.set_title(f'Hamltonian drift historgram, rectification {rectf_num}')
     histogram_path = figures_dir / f"{tag}_hamiltonian_drift_histogram.png"
-    fig.savefig(histogram_path, bbox_inches="tight")
+    _style_axis(ax)
+    fig.savefig(histogram_path, bbox_inches="tight", dpi=PUBLICATION_DPI)
     plt.close(fig)
     return {
         "trajectory_plot": str(trajectory_path),
@@ -247,40 +375,43 @@ def save_warmup_plots(
             c=time_values,
             cmap=cmap,
             norm=norm,
-            s=8,
+            s=PUBLICATION_TRAJECTORY_MARKER_SIZE,
             alpha=0.55,
             linewidths=0,
         )
         ax.autoscale()
         _set_position_labels(ax, evaluation_config, particle_descriptor)
+        _apply_axis_limits(ax, evaluation_config)
 
     def add_terminal_points(ax):
         ax.scatter(
             generated_plot[..., 0].reshape(-1),
             generated_plot[..., 1].reshape(-1),
-            s=12,
+            s=PUBLICATION_TERMINAL_MARKER_SIZE,
             alpha=0.75,
-            label="generated terminal",
+            label=r"$\tilde{\nu}$",
         )
         ax.scatter(
             reference_plot[..., 0].reshape(-1),
             reference_plot[..., 1].reshape(-1),
-            s=12,
+            s=PUBLICATION_TERMINAL_MARKER_SIZE,
             alpha=0.75,
-            label="target",
+            label=r"$\nu$",
         )
-        ax.legend(markerscale=1.5)
+        _style_legend(ax, markerscale=1.5)
         ax.autoscale()
+        _apply_axis_limits(ax, evaluation_config)
 
-    fig, ax = plt.subplots()
+    fig, ax = _publication_subplots(plt)
     add_time_scatter(ax)
     add_terminal_points(ax)
-    fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, label="t")
+    _publication_colorbar(fig, ax, plt.cm.ScalarMappable(norm=norm, cmap=cmap), label="t")
     trajectory_path = figures_dir / f"{tag}_trajectories.png"
-    fig.savefig(trajectory_path, bbox_inches="tight")
+    _style_axis(ax)
+    fig.savefig(trajectory_path, bbox_inches="tight", dpi=PUBLICATION_DPI)
     plt.close(fig)
 
-    fig, ax = plt.subplots()
+    fig, ax = _publication_subplots(plt)
     _plot_linear_contour(
         ax,
         potential,
@@ -290,12 +421,13 @@ def save_warmup_plots(
     )
     add_time_scatter(ax)
     add_terminal_points(ax)
-    fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, label="t")
+    _publication_colorbar(fig, ax, plt.cm.ScalarMappable(norm=norm, cmap=cmap), label="t")
     contour_path = figures_dir / f"{tag}_linear_potential.png"
-    fig.savefig(contour_path, bbox_inches="tight")
+    _style_axis(ax)
+    fig.savefig(contour_path, bbox_inches="tight", dpi=PUBLICATION_DPI)
     plt.close(fig)
 
-    fig, ax = plt.subplots()
+    fig, ax = _publication_subplots(plt)
     _plot_linear_contour(
         ax,
         potential,
@@ -305,8 +437,10 @@ def save_warmup_plots(
     )
     add_terminal_points(ax)
     _set_position_labels(ax, evaluation_config, particle_descriptor)
+    _apply_axis_limits(ax, evaluation_config)
     terminal_path = figures_dir / f"{tag}_terminal_scatter.png"
-    fig.savefig(terminal_path, bbox_inches="tight")
+    _style_axis(ax)
+    fig.savefig(terminal_path, bbox_inches="tight", dpi=PUBLICATION_DPI)
     plt.close(fig)
     return {
         "trajectory_plot": str(trajectory_path),
@@ -339,7 +473,7 @@ def save_bridge_solution_plots(
     mean_plot = _plot_positions(mean, evaluation_config, particle_descriptor).detach().cpu().numpy()
     std_plot = std[..., 0].detach().cpu().numpy()
 
-    fig, ax = plt.subplots()
+    fig, ax = _publication_subplots(plt)
     _plot_linear_contour(
         ax,
         potential,
@@ -349,38 +483,41 @@ def save_bridge_solution_plots(
     )
     if particle_descriptor is None:
         for path_mean in mean_plot:
-            ax.plot(path_mean[:, 0], path_mean[:, 1], alpha=0.45, linewidth=0.9)
-        ax.scatter(mean_plot[:, 0, 0], mean_plot[:, 0, 1], s=10, alpha=0.7, label="x0")
-        ax.scatter(mean_plot[:, -1, 0], mean_plot[:, -1, 1], s=10, alpha=0.7, label="x1")
+            ax.plot(path_mean[:, 0], path_mean[:, 1], alpha=0.45, linewidth=PUBLICATION_LINE_WIDTH)
+        ax.scatter(mean_plot[:, 0, 0], mean_plot[:, 0, 1], s=PUBLICATION_TERMINAL_MARKER_SIZE, alpha=0.7, label="x0")
+        ax.scatter(mean_plot[:, -1, 0], mean_plot[:, -1, 1], s=PUBLICATION_TERMINAL_MARKER_SIZE, alpha=0.7, label="x1")
     else:
         for path_mean in mean_plot:
-            ax.plot(path_mean[..., 0], path_mean[..., 1], alpha=0.45, linewidth=0.9)
+            ax.plot(path_mean[..., 0], path_mean[..., 1], alpha=0.45, linewidth=PUBLICATION_LINE_WIDTH)
         ax.scatter(
             mean_plot[:, 0, :, 0].reshape(-1),
             mean_plot[:, 0, :, 1].reshape(-1),
-            s=10,
+            s=PUBLICATION_TERMINAL_MARKER_SIZE,
             alpha=0.7,
             label="x0",
         )
         ax.scatter(
             mean_plot[:, -1, :, 0].reshape(-1),
             mean_plot[:, -1, :, 1].reshape(-1),
-            s=10,
+            s=PUBLICATION_TERMINAL_MARKER_SIZE,
             alpha=0.7,
             label="x1",
         )
     _set_position_labels(ax, evaluation_config, particle_descriptor)
-    ax.legend(markerscale=1.5)
+    _apply_axis_limits(ax, evaluation_config)
+    _style_legend(ax, markerscale=1.5)
     mean_path = figures_dir / f"{tag}_mean_trajectories.png"
-    fig.savefig(mean_path, bbox_inches="tight")
+    _style_axis(ax)
+    fig.savefig(mean_path, bbox_inches="tight", dpi=PUBLICATION_DPI)
     plt.close(fig)
 
-    fig, ax = plt.subplots()
-    ax.plot(t_np, std_plot.T, alpha=0.5, linewidth=0.9)
+    fig, ax = _publication_subplots(plt)
+    ax.plot(t_np, std_plot.T, alpha=0.5, linewidth=PUBLICATION_LINE_WIDTH)
     ax.set_xlabel("t")
     ax.set_ylabel("std")
     std_path = figures_dir / f"{tag}_std_paths.png"
-    fig.savefig(std_path, bbox_inches="tight")
+    _style_axis(ax)
+    fig.savefig(std_path, bbox_inches="tight", dpi=PUBLICATION_DPI)
     plt.close(fig)
 
     return {"mean_plot": str(mean_path), "std_plot": str(std_path)}
@@ -445,6 +582,7 @@ def _plot_linear_contour(
         source_reference.shape[-1],
         particle_descriptor=particle_descriptor,
     )
+    low, high = _resolve_plot_domain(evaluation_config, low, high)
     xs = torch.linspace(low[0], high[0], 80, device=source_reference.device, dtype=source_reference.dtype)
     ys = torch.linspace(low[1], high[1], 80, device=source_reference.device, dtype=source_reference.dtype)
     grid_x, grid_y = torch.meshgrid(xs, ys, indexing="xy")

@@ -1,6 +1,6 @@
 """Evaluation metrics, model summaries, plots, and CSV helpers."""
 
-from .distribution import _median_bandwidth, rbf_mmd2, sliced_wasserstein2
+from .distribution import MMD_loss, sinkhorn, sliced_wasserstein2
 from .io import (
     METRIC_FIELDNAMES,
     WARMUP_METRIC_FIELDNAMES,
@@ -11,11 +11,19 @@ from .model import (
     bridge_summary,
     cap_pair,
     covariance_matrix,
+    distribution_summary,
     evaluate_model,
     evaluate_warmup_model,
     integrate_model,
     terminal_summary,
     trajectory_quantities,
+)
+from .animate import (
+    available_model_specs,
+    build_parser,
+    create_particle_evolution_gifs,
+    main as animate_main,
+    resolve_checkpoint_path,
 )
 from .plotting import (
     POTENTIAL_COLORMAP,
@@ -37,7 +45,6 @@ __all__ = [
     "TIME_COLORMAP",
     "METRIC_FIELDNAMES",
     "WARMUP_METRIC_FIELDNAMES",
-    "_median_bandwidth",
     "_particle_plot_descriptor",
     "_plot_linear_contour",
     "_plot_positions",
@@ -47,17 +54,24 @@ __all__ = [
     "_reshape_particle_positions",
     "append_metrics_row",
     "append_warmup_metrics_row",
+    "animate_main",
+    "available_model_specs",
     "bridge_summary",
+    "build_parser",
     "cap_pair",
     "covariance_matrix",
+    "create_particle_evolution_gifs",
+    "distribution_summary",
     "evaluate_model",
     "evaluate_warmup_model",
     "integrate_model",
-    "rbf_mmd2",
+    "MMD_loss",
     "save_bridge_solution_plots",
     "save_evaluation_plots",
     "save_warmup_plots",
+    "sinkhorn",
     "sliced_wasserstein2",
+    "resolve_checkpoint_path",
     "terminal_summary",
     "trajectory_quantities",
 ]

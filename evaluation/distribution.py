@@ -5,49 +5,67 @@ from __future__ import annotations
 from typing import Optional
 
 import torch
+import torch.nn as nn
+from geomloss import SamplesLoss
+from ot.sliced import sliced_wasserstein_distance
 from torch import Tensor
 
 
-def sliced_wasserstein2(x: Tensor, y: Tensor, num_projections: int, *, generator=None) -> float:
-    x_flat = x.reshape(x.shape[0], -1)
-    y_flat = y.reshape(y.shape[0], -1)
-    if x_flat.shape[0] != y_flat.shape[0]:
-        n = min(x_flat.shape[0], y_flat.shape[0])
-        x_flat = x_flat[:n]
-        y_flat = y_flat[:n]
-    dim = x_flat.shape[1]
-    projections = torch.randn(
-        (int(num_projections), dim),
-        generator=generator,
-        device=x.device,
-        dtype=x.dtype,
-    )
-    projections = projections / projections.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-    x_proj = x_flat @ projections.T
-    y_proj = y_flat @ projections.T
-    x_sorted = torch.sort(x_proj, dim=0).values
-    y_sorted = torch.sort(y_proj, dim=0).values
-    return float(torch.sqrt((x_sorted - y_sorted).pow(2).mean()).detach().cpu())
 
+def sliced_wasserstein2(x: Tensor, y: Tensor, num_projections: int, *, generator = None)-> float:
+    return sliced_wasserstein_distance(x,y).detach().cpu()
 
-def _median_bandwidth(x: Tensor, y: Tensor) -> Tensor:
-    z = torch.cat([x.reshape(x.shape[0], -1), y.reshape(y.shape[0], -1)], dim=0)
-    distances = torch.pdist(z).pow(2)
-    positive = distances[distances > 0]
-    if positive.numel() == 0:
-        return torch.ones((), dtype=x.dtype, device=x.device)
-    return torch.median(positive).clamp_min(1e-12)
+def sinkhorn(x: Tensor, y: Tensor)-> float:
+    sinkhorn_cfg = {"p": 2, "blur": 0.05, "scaling": 0.95}
+    sink = SamplesLoss('sinkhorn', ** sinkhorn_cfg)
+    return sink(x,y).detach().cpu()
 
+# From : https://github.com/facebookresearch/generalized-schrodinger-bridge-matching/blob/main/gsbm/evaluator.py#L132
+class MMD_loss(nn.Module):
+    def __init__(self, kernel_mul=2.0, kernel_num=5):
+        super(MMD_loss, self).__init__()
+        self.kernel_num = kernel_num
+        self.kernel_mul = kernel_mul
+        self.fix_sigma = None
+        return
 
-def rbf_mmd2(x: Tensor, y: Tensor, bandwidth: Optional[float] = None) -> float:
-    x_flat = x.reshape(x.shape[0], -1)
-    y_flat = y.reshape(y.shape[0], -1)
-    sigma2 = (
-        torch.as_tensor(float(bandwidth), dtype=x.dtype, device=x.device).clamp_min(1e-12)
-        if bandwidth is not None
-        else _median_bandwidth(x_flat, y_flat)
-    )
-    k_xx = torch.exp(-torch.cdist(x_flat, x_flat).pow(2) / (2.0 * sigma2))
-    k_yy = torch.exp(-torch.cdist(y_flat, y_flat).pow(2) / (2.0 * sigma2))
-    k_xy = torch.exp(-torch.cdist(x_flat, y_flat).pow(2) / (2.0 * sigma2))
-    return float((k_xx.mean() + k_yy.mean() - 2.0 * k_xy.mean()).detach().cpu())
+    def guassian_kernel(
+        self, source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None
+    ):
+        n_samples = int(source.size()[0]) + int(target.size()[0])
+        total = torch.cat([source, target], dim=0)
+
+        total0 = total.unsqueeze(0).expand(
+            int(total.size(0)), int(total.size(0)), int(total.size(1))
+        )
+        total1 = total.unsqueeze(1).expand(
+            int(total.size(0)), int(total.size(0)), int(total.size(1))
+        )
+        L2_distance = ((total0 - total1) ** 2).sum(2)
+        if fix_sigma:
+            bandwidth = fix_sigma
+        else:
+            bandwidth = torch.sum(L2_distance.data) / (n_samples**2 - n_samples)
+        bandwidth /= kernel_mul ** (kernel_num // 2)
+        bandwidth_list = [bandwidth * (kernel_mul**i) for i in range(kernel_num)]
+        kernel_val = [
+            torch.exp(-L2_distance / bandwidth_temp)
+            for bandwidth_temp in bandwidth_list
+        ]
+        return sum(kernel_val)
+
+    def forward(self, source, target):
+        batch_size = int(source.size()[0])
+        kernels = self.guassian_kernel(
+            source,
+            target,
+            kernel_mul=self.kernel_mul,
+            kernel_num=self.kernel_num,
+            fix_sigma=self.fix_sigma,
+        )
+        XX = kernels[:batch_size, :batch_size]
+        YY = kernels[batch_size:, batch_size:]
+        XY = kernels[:batch_size, batch_size:]
+        YX = kernels[batch_size:, :batch_size]
+        loss = torch.mean(XX + YY - XY - YX)
+        return loss

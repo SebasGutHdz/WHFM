@@ -56,25 +56,47 @@ class GaussianBridgeSolver:
         self,
         potential,
         *,
-        sigma: float,
+        sigma: float | None = None,
+        sigma_source: float | None = None,
+        sigma_target: float | None = None,
         bridge_steps: int,
         tol: float,
         max_nodes: int,
         quadrature_order: int,
         use_monte_carlo: bool = False,
         monte_carlo_samples: int = 100,
+        num_workers: int = 1,
         failure_policy: str = "skip_pair",
     ):
         if failure_policy not in {"skip_pair", "raise"}:
             raise ValueError("failure_policy must be 'skip_pair' or 'raise'.")
+        if num_workers < 0:
+            raise ValueError("num_workers must be nonnegative.")
+        if (sigma_source is None) != (sigma_target is None):
+            raise ValueError("sigma_source and sigma_target must be provided together.")
+        if sigma_source is None:
+            if sigma is None:
+                raise ValueError("GaussianBridgeSolver requires sigma or both sigma_source and sigma_target.")
+            sigma_value = float(sigma)
+            sigma_source = sigma_value
+            sigma_target = sigma_value
+        else:
+            sigma_value = None if sigma is None else float(sigma)
+            sigma_source = float(sigma_source)
+            sigma_target = float(sigma_target)
+        if sigma_source <= 0.0 or sigma_target <= 0.0:
+            raise ValueError("sigma endpoints must be positive.")
         self.potential = potential
-        self.sigma = float(sigma)
+        self.sigma = sigma_value
+        self.sigma_source = sigma_source
+        self.sigma_target = sigma_target
         self.bridge_steps = int(bridge_steps)
         self.tol = float(tol)
         self.max_nodes = int(max_nodes)
         self.quadrature_order = int(quadrature_order)
         self.use_monte_carlo = bool(use_monte_carlo)
         self.monte_carlo_samples = int(monte_carlo_samples)
+        self.num_workers = int(num_workers)
         self.failure_policy = failure_policy
 
     def solve_batch(
@@ -98,13 +120,15 @@ class GaussianBridgeSolver:
 
         path = MeanStdBVPGaussianPath(
             self.potential,
-            sigma=self.sigma,
+            sigma_source=self.sigma_source,
+            sigma_target=self.sigma_target,
             n_steps=self.bridge_steps,
             tol=self.tol,
             max_nodes=self.max_nodes,
             quadrature_order=self.quadrature_order,
             use_monte_carlo=self.use_monte_carlo,
             monte_carlo_samples=self.monte_carlo_samples,
+            num_workers=self.num_workers,
             mu_guess=mean_guess,
             mu_dot_guess=mean_velocity_guess,
             sigma_guess=std_guess,
@@ -180,13 +204,14 @@ class GaussianBridgeSolver:
             return torch.empty((0, 4), device=x0.device, dtype=x0.dtype)
         x0_flat = x0.reshape(x0.shape[0], -1)
         x1_flat = x1.reshape(x1.shape[0], -1)
-        sigma = torch.as_tensor(self.sigma, dtype=x0.dtype, device=x0.device)
+        sigma_source = torch.as_tensor(self.sigma_source, dtype=x0.dtype, device=x0.device)
+        sigma_target = torch.as_tensor(self.sigma_target, dtype=x0.dtype, device=x0.device)
         return torch.stack(
             [
                 (mean[:, 0, :] - x0_flat).norm(dim=-1),
                 (mean[:, -1, :] - x1_flat).norm(dim=-1),
-                (std[:, 0, 0] - sigma).abs(),
-                (std[:, -1, 0] - sigma).abs(),
+                (std[:, 0, 0] - sigma_source).abs(),
+                (std[:, -1, 0] - sigma_target).abs(),
             ],
             dim=-1,
         )
