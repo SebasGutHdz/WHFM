@@ -47,6 +47,38 @@ class EntropyPotential(InternalPotential):
         self.coeff = coeff
         self.constant = constant
 
+    def score_from_gaussian_mixture(
+        self,
+        x: Tensor,
+        means: Tensor,
+        stds: Tensor,
+        *,
+        sigma_floor: float = 1e-12,
+    ) -> Tensor:
+        """Return grad_x log rho(x) for an isotropic Gaussian mixture.
+
+        x has shape (..., dim). means and stds have matching
+        leading dimensions plus a component axis: (..., components, dim)
+        and (..., components, 1). Component weights are uniform.
+        """
+
+        x = torch.as_tensor(x)
+        means = torch.as_tensor(means, dtype=x.dtype, device=x.device)
+        stds = torch.as_tensor(stds, dtype=x.dtype, device=x.device).clamp_min(
+            torch.as_tensor(sigma_floor, dtype=x.dtype, device=x.device)
+        )
+        dim = x.shape[-1]
+        x_expanded = x.unsqueeze(-2)
+        means_expanded = means.unsqueeze(-3)
+        stds_expanded = stds.unsqueeze(-3)
+        variance = stds_expanded.pow(2)
+        diff = x_expanded - means_expanded
+        sq_dist = diff.pow(2).sum(dim=-1)
+        log_prob = -float(dim) * torch.log(stds_expanded.squeeze(-1)) - 0.5 * sq_dist / variance.squeeze(-1)
+        responsibilities = torch.softmax(log_prob, dim=-1)
+        component_scores = -diff / variance
+        return (responsibilities.unsqueeze(-1) * component_scores).sum(dim=-2)
+
     def batch_energy(self, x: Tensor, bandwidth=None) -> Tensor:
         """Return per-sample KDE entropy energy for a batch of samples.
 

@@ -194,6 +194,9 @@ class BridgeSolverConfig:
     quadrature_order: int = 4
     use_monte_carlo: bool = False
     monte_carlo_samples: int = 100
+    n_density_samples: int = 1
+    n_reference_grid: Optional[int] = None
+    entropy_density_std_floor: Optional[float] = None
     num_workers: int = 1
     failure_policy: str = "skip_pair"
 
@@ -218,6 +221,11 @@ class BridgeSolverConfig:
                 object.__setattr__(self, "sigma", float(self.sigma))
         if sigma_source <= 0.0 or sigma_target <= 0.0:
             raise ValueError("bridge_solver sigma endpoints must be positive.")
+        if self.entropy_density_std_floor is not None:
+            entropy_density_std_floor = float(self.entropy_density_std_floor)
+            if entropy_density_std_floor <= 0.0:
+                raise ValueError("bridge_solver.entropy_density_std_floor must be positive when provided.")
+            object.__setattr__(self, "entropy_density_std_floor", entropy_density_std_floor)
         object.__setattr__(self, "sigma_source", sigma_source)
         object.__setattr__(self, "sigma_target", sigma_target)
 
@@ -230,6 +238,9 @@ class BridgeSolverConfig:
         data.setdefault("sigma_target", None)
         data.setdefault("use_monte_carlo", False)
         data.setdefault("monte_carlo_samples", 100)
+        data.setdefault("n_density_samples", 1)
+        data.setdefault("n_reference_grid", None)
+        data.setdefault("entropy_density_std_floor", None)
         data.setdefault("num_workers", 1)
         cfg = _strict_dataclass(cls, data, "bridge_solver")
         if cfg.kind != "scipy":
@@ -238,6 +249,12 @@ class BridgeSolverConfig:
             raise ValueError("bridge_solver step, node, and quadrature sizes must be positive.")
         if cfg.monte_carlo_samples <= 0:
             raise ValueError("bridge_solver.monte_carlo_samples must be positive.")
+        if cfg.n_density_samples <= 0:
+            raise ValueError("bridge_solver.n_density_samples must be positive.")
+        if cfg.n_reference_grid is not None and cfg.n_reference_grid < 2:
+            raise ValueError("bridge_solver.n_reference_grid must be at least 2 when provided.")
+        if cfg.entropy_density_std_floor is not None and cfg.entropy_density_std_floor <= 0.0:
+            raise ValueError("bridge_solver.entropy_density_std_floor must be positive when provided.")
         if cfg.num_workers < 0:
             raise ValueError("bridge_solver.num_workers must be nonnegative.")
         if cfg.tol <= 0.0:

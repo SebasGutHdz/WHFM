@@ -100,6 +100,9 @@ class HamiltonianTrainer:
             quadrature_order=train_config.bridge_solver.quadrature_order,
             use_monte_carlo=train_config.bridge_solver.use_monte_carlo,
             monte_carlo_samples=train_config.bridge_solver.monte_carlo_samples,
+            n_density_samples=train_config.bridge_solver.n_density_samples,
+            n_reference_grid=train_config.bridge_solver.n_reference_grid,
+            entropy_density_std_floor=train_config.bridge_solver.entropy_density_std_floor,
             num_workers=train_config.bridge_solver.num_workers,
             failure_policy=train_config.bridge_solver.failure_policy,
         )
@@ -210,6 +213,8 @@ class HamiltonianTrainer:
                     x_source, y_target, generation_state.generation_model
                 )
             self._record_bridge_metrics(direction, rectification_index, batch_index, solution)
+            print('\n')
+            print(f"Solved {solution.num_successful} GBVP successfully")
             if solution.num_successful == 0:
                 if self.train_config.bridge_solver.failure_policy == "raise":
                     raise RuntimeError(f"{direction.value}: no successful bridge pairs.")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
 from typing import Dict, Tuple
 import pickle
 import time
@@ -49,6 +50,15 @@ def _mean_std_bvp_worker_init():
         pass
 
 
+def _safe_multiprocessing_context():
+    for method in ("forkserver", "spawn"):
+        try:
+            return multiprocessing.get_context(method)
+        except ValueError:
+            continue
+    raise RuntimeError("No safe multiprocessing start method is available.")
+
+
 def _interpolate_reference_samples_numpy(
     t,
     n_mesh: int,
@@ -84,14 +94,30 @@ def _make_mean_std_bvp_rhs(
     interaction_coefficient: float = 1.0,
     reference_t_grid=None,
     reference_samples=None,
+    reference_means=None,
+    reference_stds=None,
 ):
     q = eps.shape[0]
     has_interaction = interaction_potential is not None
+    has_internal = bool(getattr(potential, "has_internal", False))
     if has_interaction and (reference_t_grid is None or reference_samples is None):
         raise RuntimeError(
             "Interaction RHS requires frozen reference samples. Call batch_solve "
             "or pass reference_t_grid/reference_samples to _make_rhs."
         )
+    if has_internal and (reference_t_grid is None or reference_means is None or reference_stds is None):
+        raise RuntimeError(
+            "Internal entropy RHS requires frozen reference Gaussian mixture parameters. "
+            "Call batch_solve or pass reference_t_grid/reference_means/reference_stds to _make_rhs."
+        )
+    internal_gradient = None
+    if has_internal:
+        internal_gradient = getattr(potential, "internal_gradient_from_gaussian_mixture", None)
+        if internal_gradient is None:
+            raise TypeError(
+                "Configured internal BVP forces require "
+                "internal_gradient_from_gaussian_mixture(x, means, stds)."
+            )
     linear_gradient = getattr(potential, "linear_gradient", None)
     if linear_gradient is None:
         linear_gradient = potential.gradient
@@ -112,6 +138,40 @@ def _make_mean_std_bvp_rhs(
             weights[None, :] * np.sum(grad * eps[None, :, :], axis=-1),
             axis=1,
         ) / dim
+
+        if has_internal:
+            mu_ref = _interpolate_reference_samples_numpy(
+                _t, n_mesh, reference_t_grid, reference_means
+            )
+            sigma_ref = _interpolate_reference_samples_numpy(
+                _t, n_mesh, reference_t_grid, reference_stds
+            )
+            internal_x_t = torch.as_tensor(
+                np.array(x_quad, copy=True), dtype=torch.float64
+            )
+            internal_means_t = torch.as_tensor(
+                np.array(mu_ref, copy=True), dtype=torch.float64
+            )
+            internal_stds_t = torch.as_tensor(
+                np.array(sigma_ref, copy=True), dtype=torch.float64
+            )
+            internal_grad = (
+                internal_gradient(internal_x_t, internal_means_t, internal_stds_t)
+                .detach()
+                .cpu()
+                .numpy()
+                .reshape(n_mesh, q, dim)
+            )
+            internal_mu_accel = np.sum(
+                weights[None, :, None] * internal_grad,
+                axis=1,
+            )
+            internal_sigma_accel = np.sum(
+                weights[None, :] * np.sum(internal_grad * eps[None, :, :], axis=-1),
+                axis=1,
+            ) / dim
+            mean_grad = mean_grad - internal_mu_accel
+            sigma_accel = sigma_accel - internal_sigma_accel
 
         if has_interaction:
             y_ref = _interpolate_reference_samples_numpy(
@@ -188,6 +248,8 @@ def _solve_mean_std_bvp_pair(job):
         interaction_coefficient=job["interaction_coefficient"],
         reference_t_grid=job["reference_t_grid"],
         reference_samples=job["reference_samples"],
+        reference_means=job["reference_means"],
+        reference_stds=job["reference_stds"],
     )
 
     solve_start = time.perf_counter()
@@ -517,6 +579,7 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
         interaction_coefficient: float = 1.0,
         n_density_samples: int = 1,
         n_reference_grid: int = None,
+        entropy_density_std_floor: float | None = None,
         use_monte_carlo: bool = False,
         monte_carlo_samples: int = 100,
         num_workers: int = 1,
@@ -543,6 +606,8 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
             raise ValueError("n_density_samples must be positive.")
         if n_reference_grid is not None and n_reference_grid < 2:
             raise ValueError("n_reference_grid must be at least 2.")
+        if entropy_density_std_floor is not None and entropy_density_std_floor <= 0.0:
+            raise ValueError("entropy_density_std_floor must be positive when provided.")
         if monte_carlo_samples < 1:
             raise ValueError("monte_carlo_samples must be positive.")
         if num_workers < 0:
@@ -555,6 +620,9 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
         self.quadrature_order = int(quadrature_order)
         self.n_density_samples = int(n_density_samples)
         self.n_reference_grid = n_reference_grid
+        self.entropy_density_std_floor = (
+            None if entropy_density_std_floor is None else float(entropy_density_std_floor)
+        )
         self.use_monte_carlo = bool(use_monte_carlo)
         self.monte_carlo_samples = int(monte_carlo_samples)
         self.num_workers = int(num_workers)
@@ -568,8 +636,11 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
         )
         self.interaction_potential = potential if configured_interaction else interaction_potential
         self.interaction_coefficient = 1.0 if configured_interaction else float(interaction_coefficient)
+        self.has_internal_force = bool(getattr(potential, "has_internal", False))
         self.reference_t_grid = None
         self.reference_samples = None
+        self.reference_means = None
+        self.reference_stds = None
         self.reference_indices = None
         self.reference_noise = None
         self.reference_states = None
@@ -706,6 +777,8 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
         mu_dot_guess: np.ndarray,
         sigma_guess: np.ndarray,
         sigma_dot_guess: np.ndarray,
+        *,
+        build_samples: bool = True,
     ):
         n_pairs, dim = x0_flat.shape
         solve_grid = np.linspace(0.0, 1.0, self.n_steps + 1)
@@ -726,7 +799,6 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
         reference_states = np.stack(reference_states, axis=0)
 
         sample_indices = torch.randint(n_pairs, (self.n_density_samples,)).detach().cpu().numpy()
-        sample_noise = torch.randn(self.n_density_samples, dim).detach().cpu().numpy()
 
         selected_states = reference_states[sample_indices]
         selected_states = np.stack(
@@ -738,21 +810,43 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
         )
         mu_ref = selected_states[:, :, :dim]
         sigma_ref = selected_states[:, :, 2 * dim : 2 * dim + 1]
-        reference_samples = mu_ref + sigma_ref * sample_noise[None, :, :]
+        if np.any(sigma_ref <= 0):
+            raise RuntimeError("Reference Gaussian mixture contains a nonpositive sigma value.")
+        density_sigma_ref = sigma_ref
+        if self.entropy_density_std_floor is not None:
+            density_sigma_ref = np.maximum(sigma_ref, self.entropy_density_std_floor)
+        sample_noise = None
+        reference_samples = None
+        if build_samples:
+            sample_noise = torch.randn(self.n_density_samples, dim).detach().cpu().numpy()
+            reference_samples = mu_ref + sigma_ref * sample_noise[None, :, :]
 
         self.reference_t_grid = reference_t_grid
         self.reference_samples = reference_samples
+        self.reference_means = mu_ref
+        self.reference_stds = density_sigma_ref
         self.reference_indices = sample_indices
         self.reference_noise = sample_noise
         self.reference_states = reference_states
-        return reference_t_grid, reference_samples
+        return reference_t_grid, reference_samples, mu_ref, density_sigma_ref
 
-    def _make_rhs(self, dim: int, reference_t_grid=None, reference_samples=None):
+    def _make_rhs(
+        self,
+        dim: int,
+        reference_t_grid=None,
+        reference_samples=None,
+        reference_means=None,
+        reference_stds=None,
+    ):
         eps, weights = self._normal_integration_rule(dim)
         has_interaction = self.interaction_potential is not None
         if has_interaction and (reference_t_grid is None or reference_samples is None):
             reference_t_grid = self.reference_t_grid
             reference_samples = self.reference_samples
+        if self.has_internal_force and (reference_t_grid is None or reference_means is None or reference_stds is None):
+            reference_t_grid = self.reference_t_grid
+            reference_means = self.reference_means
+            reference_stds = self.reference_stds
         return _make_mean_std_bvp_rhs(
             self.potential,
             dim,
@@ -762,6 +856,8 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
             interaction_coefficient=self.interaction_coefficient,
             reference_t_grid=reference_t_grid,
             reference_samples=reference_samples,
+            reference_means=reference_means,
+            reference_stds=reference_stds,
         )
 
     def _build_pair_solve_jobs(
@@ -775,6 +871,8 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
         solve_sigma_dot_guess: np.ndarray,
         reference_t_grid,
         reference_samples,
+        reference_means,
+        reference_stds,
     ):
         _, dim = x0_flat.shape
         eps, weights = self._normal_integration_rule(dim)
@@ -792,6 +890,8 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
             "interaction_coefficient": self.interaction_coefficient,
             "reference_t_grid": reference_t_grid,
             "reference_samples": reference_samples,
+            "reference_means": reference_means,
+            "reference_stds": reference_stds,
         }
         jobs = []
         for i, (start_t, end_t) in enumerate(zip(x0_flat, x1_flat)):
@@ -828,16 +928,20 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
             ) from exc
 
         max_workers = min(self.num_workers, len(jobs))
+        context = _safe_multiprocessing_context()
+        start_method = context.get_start_method()
         try:
             with ProcessPoolExecutor(
                 max_workers=max_workers,
                 initializer=_mean_std_bvp_worker_init,
+                mp_context=context,
             ) as executor:
                 return list(executor.map(_solve_mean_std_bvp_pair, jobs))
         except Exception as exc:
             raise ValueError(
-                "Parallel SciPy BVP solve failed; ensure the potential is picklable "
-                "or set bridge_solver.num_workers: 1."
+                "Parallel SciPy BVP solve failed with "
+                f"multiprocessing start method {start_method!r}: {exc}. "
+                "Set bridge_solver.num_workers: 1 to use the serial solver."
             ) from exc
 
     def batch_solve(self, x0: Tensor, x1: Tensor) -> Tensor:
@@ -875,18 +979,21 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
         solve_sigma_guess = default_sigma if sigma_guess is None else sigma_guess
         solve_sigma_dot_guess = default_sigma_dot if sigma_dot_guess is None else sigma_dot_guess
 
-        if self.interaction_potential is not None:
-            reference_t_grid, reference_samples = self._build_reference_samples(
+        if self.interaction_potential is not None or self.has_internal_force:
+            reference_t_grid, reference_samples, reference_means, reference_stds = self._build_reference_samples(
                 x0_flat,
                 x1_flat,
                 solve_mu_guess,
                 solve_mu_dot_guess,
                 solve_sigma_guess,
                 solve_sigma_dot_guess,
+                build_samples=self.interaction_potential is not None,
             )
         else:
             reference_t_grid = None
             reference_samples = None
+            reference_means = None
+            reference_stds = None
 
         jobs = self._build_pair_solve_jobs(
             x0_flat,
@@ -898,6 +1005,8 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
             solve_sigma_dot_guess,
             reference_t_grid,
             reference_samples,
+            reference_means,
+            reference_stds,
         )
 
         states = []

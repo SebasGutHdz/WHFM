@@ -27,10 +27,11 @@ from .plotting import (
     PUBLICATION_GIF_CURRENT_MARKER_SIZE,
     PUBLICATION_GIF_FIGSIZE,
     PUBLICATION_GIF_STATIC_MARKER_SIZE,
+    POTENTIAL_COLORMAP,
     PUBLICATION_TITLE_SIZE,
     _apply_publication_style,
+    _linear_contour_values,
     _particle_plot_descriptor,
-    _plot_linear_contour,
     _plot_positions,
     _projected_plot_domain,
     _resolve_plot_domain,
@@ -382,6 +383,44 @@ def _sample_boundary(
     return x
 
 
+def _dynamic_linear_contour_frame_values(
+    potential,
+    frame_reference: Tensor,
+    evaluation_config,
+    grid_x: Tensor,
+    grid_y: Tensor,
+    particle_descriptor,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    if not getattr(potential, "has_linear", False):
+        return None
+
+    with torch.no_grad():
+        values = _linear_contour_values(
+            potential,
+            frame_reference,
+            evaluation_config,
+            grid_x,
+            grid_y,
+            particle_descriptor,
+        )
+    values_np = values.detach().cpu().numpy()
+    finite_values = values_np[np.isfinite(values_np)]
+    if finite_values.size == 0:
+        return None
+    vmin, vmax = np.percentile(finite_values, [2.0, 98.0])
+    vmin = float(vmin)
+    vmax = float(vmax)
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+        vmin = float(finite_values.min())
+        vmax = float(finite_values.max())
+    if vmin == vmax:
+        delta = max(abs(vmin) * 0.01, 1.0)
+        vmin -= delta
+        vmax += delta
+    levels = np.linspace(vmin, vmax, 35)
+    return values_np, levels
+
+
 def _save_particle_evolution_gif(
     *,
     gif_path: Path,
@@ -430,39 +469,115 @@ def _save_particle_evolution_gif(
     reference_plot = _plot_positions(reference, evaluation_config, descriptor).detach().cpu().numpy()
     t_np = time_grid.detach().cpu().numpy()
 
+    dynamic_background = None
+    grid_x = None
+    grid_y = None
+    grid_x_np = None
+    grid_y_np = None
+    if potential_background and getattr(potential, "has_linear", False):
+        xs = torch.linspace(low[0], high[0], 80, device=traj.device, dtype=traj.dtype)
+        ys = torch.linspace(low[1], high[1], 80, device=traj.device, dtype=traj.dtype)
+        grid_x, grid_y = torch.meshgrid(xs, ys, indexing="xy")
+        dynamic_background = _dynamic_linear_contour_frame_values(
+            potential,
+            traj[0],
+            evaluation_config,
+            grid_x,
+            grid_y,
+            descriptor,
+        )
+        if dynamic_background is not None:
+            grid_x_np = grid_x.detach().cpu().numpy()
+            grid_y_np = grid_y.detach().cpu().numpy()
+
     _apply_publication_style(plt)
     fig, ax = plt.subplots(figsize=PUBLICATION_GIF_FIGSIZE, constrained_layout=True)
-    if potential_background:
-        _plot_linear_contour(
-            ax,
+    contour_sets = []
+
+    def draw_contour(frame: int):
+        if dynamic_background is None:
+            return []
+        frame_background = _dynamic_linear_contour_frame_values(
             potential,
-            source_reference,
+            traj[frame],
             evaluation_config,
-            domain_tensors=(traj, source_reference, generated, reference),
+            grid_x,
+            grid_y,
+            descriptor,
         )
+        if frame_background is None:
+            return []
+        values_np, levels = frame_background
+        contour_fill = ax.contourf(
+            grid_x_np,
+            grid_y_np,
+            values_np,
+            levels=levels,
+            alpha=0.25,
+            cmap=POTENTIAL_COLORMAP,
+            zorder=0,
+            extend="both",
+        )
+        contour_lines = ax.contour(
+            grid_x_np,
+            grid_y_np,
+            values_np,
+            levels=levels,
+            colors="0.20",
+            linewidths=0.8,
+            alpha=0.85,
+            zorder=1,
+        )
+        return [contour_fill, contour_lines]
+
+    def clear_contours():
+        for contour_set in contour_sets:
+            for artist in getattr(contour_set, "collections", ()):
+                artist.remove()
+        contour_sets.clear()
+
+    contour_sets.extend(draw_contour(0))
     ax.scatter(
         _flatten_positions(source_plot)[0],
         _flatten_positions(source_plot)[1],
         s=PUBLICATION_GIF_STATIC_MARKER_SIZE,
         alpha=0.25,
-        label="Start",
+        zorder=4,
+        label=r"$\mu$",
     )
     ax.scatter(
         _flatten_positions(reference_plot)[0],
         _flatten_positions(reference_plot)[1],
         s=PUBLICATION_GIF_STATIC_MARKER_SIZE,
         alpha=0.35,
-        label="Reference",
+        zorder=4,
+        label=r"$\nu$",
     )
     ax.scatter(
         _flatten_positions(generated_plot)[0],
         _flatten_positions(generated_plot)[1],
         s=PUBLICATION_GIF_STATIC_MARKER_SIZE,
         alpha=0.35,
-        label="Generated terminal",
+        zorder=4,
+        label=r"$\tilde{\nu}$",
     )
-    current = ax.scatter([], [], s=PUBLICATION_GIF_CURRENT_MARKER_SIZE, alpha=0.9, label="Current")
-    text = ax.text(0.02, 0.98, "", transform=ax.transAxes, va="top", fontsize=PUBLICATION_TITLE_SIZE)
+    current = ax.scatter(
+        [],
+        [],
+        s=PUBLICATION_GIF_CURRENT_MARKER_SIZE,
+        alpha=0.9,
+        zorder=5,
+        label=r"$Z_t$",
+    )
+    text = ax.text(
+        0.02,
+        0.98,
+        "",
+        transform=ax.transAxes,
+        va="top",
+        fontsize=PUBLICATION_TITLE_SIZE,
+        zorder=6,
+    )
     ax.set_xlim(float(low[0].detach().cpu()), float(high[0].detach().cpu()))
     ax.set_ylim(float(low[1].detach().cpu()), float(high[1].detach().cpu()))
     # ax.set_aspect("equal", adjustable="box")
@@ -474,6 +589,9 @@ def _save_particle_evolution_gif(
         layout_engine.set(w_pad=0.02, h_pad=0.02, wspace=0.02, hspace=0.02)
 
     def update(frame: int):
+        if dynamic_background is not None:
+            clear_contours()
+            contour_sets.extend(draw_contour(frame))
         x, y = _flatten_positions(traj_plot[frame])
         current.set_offsets(np.column_stack([x, y]))
         text.set_text(f"t={float(t_np[frame]):.3f}")

@@ -65,11 +65,20 @@ class GaussianBridgeSolver:
         quadrature_order: int,
         use_monte_carlo: bool = False,
         monte_carlo_samples: int = 100,
+        n_density_samples: int = 1,
+        n_reference_grid: int | None = None,
+        entropy_density_std_floor: float | None = None,
         num_workers: int = 1,
         failure_policy: str = "skip_pair",
     ):
         if failure_policy not in {"skip_pair", "raise"}:
             raise ValueError("failure_policy must be 'skip_pair' or 'raise'.")
+        if n_density_samples <= 0:
+            raise ValueError("n_density_samples must be positive.")
+        if n_reference_grid is not None and n_reference_grid < 2:
+            raise ValueError("n_reference_grid must be at least 2 when provided.")
+        if entropy_density_std_floor is not None and entropy_density_std_floor <= 0.0:
+            raise ValueError("entropy_density_std_floor must be positive when provided.")
         if num_workers < 0:
             raise ValueError("num_workers must be nonnegative.")
         if (sigma_source is None) != (sigma_target is None):
@@ -96,6 +105,11 @@ class GaussianBridgeSolver:
         self.quadrature_order = int(quadrature_order)
         self.use_monte_carlo = bool(use_monte_carlo)
         self.monte_carlo_samples = int(monte_carlo_samples)
+        self.n_density_samples = int(n_density_samples)
+        self.n_reference_grid = None if n_reference_grid is None else int(n_reference_grid)
+        self.entropy_density_std_floor = (
+            None if entropy_density_std_floor is None else float(entropy_density_std_floor)
+        )
         self.num_workers = int(num_workers)
         self.failure_policy = failure_policy
 
@@ -128,6 +142,9 @@ class GaussianBridgeSolver:
             quadrature_order=self.quadrature_order,
             use_monte_carlo=self.use_monte_carlo,
             monte_carlo_samples=self.monte_carlo_samples,
+            n_density_samples=self.n_density_samples,
+            n_reference_grid=self.n_reference_grid,
+            entropy_density_std_floor=self.entropy_density_std_floor,
             num_workers=self.num_workers,
             mu_guess=mean_guess,
             mu_dot_guess=mean_velocity_guess,

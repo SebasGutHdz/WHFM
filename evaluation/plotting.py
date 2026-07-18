@@ -29,8 +29,8 @@ PUBLICATION_TICK_WIDTH = 1.2
 PUBLICATION_LINE_WIDTH = 1.6
 PUBLICATION_TRAJECTORY_MARKER_SIZE = 5
 PUBLICATION_TERMINAL_MARKER_SIZE = 10
-PUBLICATION_GIF_STATIC_MARKER_SIZE = 18
-PUBLICATION_GIF_CURRENT_MARKER_SIZE = 56
+PUBLICATION_GIF_STATIC_MARKER_SIZE = 10
+PUBLICATION_GIF_CURRENT_MARKER_SIZE = 5
 
 
 @dataclass(frozen=True)
@@ -563,6 +563,35 @@ def _projected_plot_domain(
     return low - padding, high + padding
 
 
+def _linear_contour_values(
+    potential,
+    source_reference: Tensor,
+    evaluation_config,
+    grid_x: Tensor,
+    grid_y: Tensor,
+    particle_descriptor,
+) -> Tensor:
+    i, j = _projection_indices(evaluation_config, source_reference.shape[-1])
+    ref = source_reference.mean(dim=0)
+    grid_points = torch.stack([grid_x.reshape(-1), grid_y.reshape(-1)], dim=-1)
+
+    if particle_descriptor is None:
+        points = ref.reshape(1, -1).repeat(grid_points.shape[0], 1)
+        points[:, i] = grid_points[:, 0]
+        points[:, j] = grid_points[:, 1]
+        return potential.linear_energy(points).reshape(grid_x.shape)
+
+    ref_particles = _reshape_particle_positions(ref, particle_descriptor)
+    n_particles = particle_descriptor.n_particles
+    points = ref_particles.reshape(1, n_particles, particle_descriptor.particle_dim)
+    points = points.repeat(grid_points.shape[0] * n_particles, 1, 1)
+    particle_indices = torch.arange(n_particles, device=grid_points.device).repeat(grid_points.shape[0])
+    batch_indices = torch.arange(points.shape[0], device=grid_points.device)
+    points[batch_indices, particle_indices] = grid_points.repeat_interleave(n_particles, dim=0)
+    values = potential.linear_energy(points.reshape(points.shape[0], source_reference.shape[-1]))
+    return values.reshape(grid_points.shape[0], n_particles).mean(dim=1).reshape(grid_x.shape)
+
+
 def _plot_linear_contour(
     ax,
     potential,
@@ -573,8 +602,6 @@ def _plot_linear_contour(
 ) -> None:
     if not getattr(potential, "has_linear", False):
         return
-    i, j = _projection_indices(evaluation_config, source_reference.shape[-1])
-    ref = source_reference.mean(dim=0)
     particle_descriptor = _particle_plot_descriptor(potential, source_reference.shape[-1])
     low, high = _projected_plot_domain(
         domain_tensors if domain_tensors is not None else (source_reference,),
@@ -586,11 +613,15 @@ def _plot_linear_contour(
     xs = torch.linspace(low[0], high[0], 80, device=source_reference.device, dtype=source_reference.dtype)
     ys = torch.linspace(low[1], high[1], 80, device=source_reference.device, dtype=source_reference.dtype)
     grid_x, grid_y = torch.meshgrid(xs, ys, indexing="xy")
-    points = ref.reshape(1, -1).repeat(grid_x.numel(), 1)
-    points[:, i] = grid_x.reshape(-1)
-    points[:, j] = grid_y.reshape(-1)
     with torch.no_grad():
-        values = potential.linear_energy(points).reshape(grid_x.shape).detach().cpu().numpy()
+        values = _linear_contour_values(
+            potential,
+            source_reference,
+            evaluation_config,
+            grid_x,
+            grid_y,
+            particle_descriptor,
+        ).detach().cpu().numpy()
     grid_x_np = grid_x.detach().cpu().numpy()
     grid_y_np = grid_y.detach().cpu().numpy()
     contour_fill = ax.contourf(

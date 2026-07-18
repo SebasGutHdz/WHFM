@@ -1,4 +1,4 @@
-name: stunnel
+name: stunnel_interaction
 dimension: 2
 
 boundaries:
@@ -19,8 +19,8 @@ boundaries:
 
 functional:
   linear: [stunnel, -35.0]
-  internal: null #['rational_quadratic',-1.0]
-  interaction: null
+  internal: null
+  interaction: ['rational_quadratic',-7.5]
 
 evaluation:
   num_samples: 3000

@@ -125,11 +125,25 @@ class ConfiguredPotential(Potential):
             )
         return _as_like(self.internal_coefficient, x) * self.internal.batch_energy(x)
 
+    def internal_gradient_from_gaussian_mixture(
+        self, x: Tensor, means: Tensor, stds: Tensor
+    ) -> Tensor:
+        if self.internal is None:
+            return torch.zeros_like(x)
+        if not hasattr(self.internal, "score_from_gaussian_mixture"):
+            raise TypeError(
+                f"Internal potential '{self.internal_name}' does not provide "
+                "score_from_gaussian_mixture(x, means, stds)."
+            )
+        coefficient = _as_like(self.internal_coefficient, x)
+        return coefficient * self.internal.score_from_gaussian_mixture(x, means, stds)
+
     def interaction_energy(self, x: Tensor, y: Tensor = None) -> Tensor:
         if self.interaction is None:
             return self._zeros(x)
         y = self._shuffled_batch(x) if y is None else y
-        return _as_like(self.interaction_coefficient, x) * self.interaction.interaction_energy(x, y)
+        coefficient = 0.5 * _as_like(self.interaction_coefficient, x)
+        return coefficient * self.interaction.interaction_energy(x, y)
 
     def interaction_gradient(self, x: Tensor, y: Tensor = None) -> Tensor:
         if self.interaction is None:

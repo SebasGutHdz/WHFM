@@ -32,8 +32,8 @@ functional:
     parameters:
       n_particles: 6
       charges: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-      coulomb_constant: 4.0
-      epsilon: 0.1
+      coulomb_constant: 3.0
+      epsilon: 0.01
       particle_dim: 2
   internal: null
   interaction: null

@@ -1,4 +1,4 @@
-name: stunnel
+name: vneck_entropy
 dimension: 2
 
 boundaries:
@@ -7,19 +7,19 @@ boundaries:
     name: 2d_gaussian
     parameters:
       mean: [-11.0, -1.0]
-      std: 0.5
+      std: 0.70 #4472135955
     sample_noise: 0.0
   target:
     kind: dataset
     name: 2d_gaussian
     parameters:
       mean: [11.0, 1.0]
-      std: 0.5
+      std: 0.70 #4472135955
     sample_noise: 0.0
 
 functional:
-  linear: [stunnel, -35.0]
-  internal: null #['rational_quadratic',-1.0]
+  linear: [vneck, -300.0]
+  internal: [entropy, -5.0]
   interaction: null
 
 evaluation:
@@ -30,6 +30,6 @@ evaluation:
   plot_trajectory_count: 512
   plot_dir1: 0
   plot_dir2: 1
-  plot_xlim: [0.0, 0.0]
-  plot_ylim: [0.0, 0.0]
+  plot_xlim: [0.0,0.0]
+  plot_ylim: [0.0,0.0]
   xaxis_hist: 0.4
