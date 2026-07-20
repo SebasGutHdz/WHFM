@@ -71,8 +71,11 @@ from .evaluation import (
     sinkhorn,
     sliced_wasserstein2,
 )
+from .models import FourierTimeResidualMLP, SiLUResBlock
 from .node import NodeSolver, NodeTrajectory, call_velocity_model
+from .optimal_transport import OTPlanSampler
 from .trainer import BoundaryProblem, HamiltonianTrainer
+from .trainer_v2 import HamiltonianTrainerV2, RectificationV2Config, TrainV2Config
 from .gaussian_paths import (
     DeterministicBVPPath,
     GaussianPath,
@@ -232,11 +235,17 @@ __all__ = [
     "MMD_loss",
     "sinkhorn",
     "sliced_wasserstein2",
+    "FourierTimeResidualMLP",
+    "SiLUResBlock",
+    "OTPlanSampler",
     "NodeSolver",
     "NodeTrajectory",
     "call_velocity_model",
     "BoundaryProblem",
     "HamiltonianTrainer",
+    "HamiltonianTrainerV2",
+    "RectificationV2Config",
+    "TrainV2Config",
     "flow_matching_loss",
     "finite_difference_time_derivative",
     "hamiltonian_physics_loss",

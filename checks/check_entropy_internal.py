@@ -1,28 +1,18 @@
 from __future__ import annotations
 
 import importlib
-from pathlib import Path
-import sys
 
 import numpy as np
 import torch
 
-ROOT = Path(__file__).resolve().parents[3]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
 EntropyPotential = importlib.import_module(
-    "torchcfm.WHFM-standalone.Potentials.internal_potentials"
+    "whfm.Potentials.internal_potentials"
 ).EntropyPotential
 ConfiguredPotential = importlib.import_module(
-    "torchcfm.WHFM-standalone.Potentials.configured_potential"
+    "whfm.Potentials.configured_potential"
 ).ConfiguredPotential
-BridgeSolverConfig = importlib.import_module(
-    "torchcfm.WHFM-standalone.config"
-).BridgeSolverConfig
-_gaussian_paths = importlib.import_module(
-    "torchcfm.WHFM-standalone.gaussian_paths"
-)
+BridgeSolverConfig = importlib.import_module("whfm.config").BridgeSolverConfig
+_gaussian_paths = importlib.import_module("whfm.gaussian_paths")
 _make_mean_std_bvp_rhs = _gaussian_paths._make_mean_std_bvp_rhs
 MeanStdBVPGaussianPath = _gaussian_paths.MeanStdBVPGaussianPath
 

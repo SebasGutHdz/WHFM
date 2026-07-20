@@ -9,6 +9,18 @@ from .losses import flow_matching_loss
 from .gaussian_paths import MeanStdBVPGaussianPath
 
 
+class TorchdynModelWrapper(torch.nn.Module):
+    """Adapt a concatenated-time velocity model to the torchdyn call signature."""
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, t, x, *args, **kwargs):
+        time = t.expand(x.shape[0]).reshape(-1, 1)
+        return self.model(torch.cat([x, time], dim=1))
+
+
 def to_numpy(x):
     return x.detach().cpu().numpy()
 
@@ -19,8 +31,12 @@ def as_particles(q: Tensor, n_particles: int, particle_dim: int) -> Tensor:
 
 def make_hamiltonian_node(model, *, sensitivity: str = "adjoint", solver: str = "euler"):
     from torchdyn.core import NeuralODE
-    from torchcfm.utils import torch_wrapper
-    return NeuralODE(torch_wrapper(model), sensitivity=sensitivity, solver=solver)
+
+    return NeuralODE(
+        TorchdynModelWrapper(model),
+        sensitivity=sensitivity,
+        solver=solver,
+    )
 
 
 def make_mean_std_bvp_path(potential, *, sigma, n_steps: int, tol: float, quadrature_order: int, **kwargs):

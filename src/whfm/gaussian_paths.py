@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 import multiprocessing
+import os
 from typing import Dict, Tuple
 import pickle
 import time
@@ -48,6 +50,24 @@ def _mean_std_bvp_worker_init():
         torch.set_num_threads(1)
     except RuntimeError:
         pass
+
+
+
+@contextmanager
+def _multiprocessing_worker_environment():
+    key = "MKL_THREADING_LAYER"
+    previous = os.environ.get(key)
+    changed = previous is None or previous.upper() == "INTEL"
+    if changed:
+        os.environ[key] = "GNU"
+    try:
+        yield
+    finally:
+        if changed:
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
 
 
 def _safe_multiprocessing_context():
@@ -931,12 +951,13 @@ class MeanStdBVPGaussianPath(_CachedBVPPath):
         context = _safe_multiprocessing_context()
         start_method = context.get_start_method()
         try:
-            with ProcessPoolExecutor(
-                max_workers=max_workers,
-                initializer=_mean_std_bvp_worker_init,
-                mp_context=context,
-            ) as executor:
-                return list(executor.map(_solve_mean_std_bvp_pair, jobs))
+            with _multiprocessing_worker_environment():
+                with ProcessPoolExecutor(
+                    max_workers=max_workers,
+                    initializer=_mean_std_bvp_worker_init,
+                    mp_context=context,
+                ) as executor:
+                    return list(executor.map(_solve_mean_std_bvp_pair, jobs))
         except Exception as exc:
             raise ValueError(
                 "Parallel SciPy BVP solve failed with "

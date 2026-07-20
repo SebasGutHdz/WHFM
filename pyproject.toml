@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whfm-standalone"
+version = "0.1.0"
+description = "Wasserstein Hamiltonian Flow Matching training and evaluation tools"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch",
+  "numpy",
+  "scipy",
+  "scikit-learn",
+  "PyYAML",
+  "tqdm",
+  "POT",
+  "geomloss",
+]
+
+[project.optional-dependencies]
+viz = ["matplotlib", "Pillow"]
+test = ["pytest", "build"]
+
+[project.scripts]
+whfm-train = "whfm.train:main"
+whfm-train-v2 = "whfm.trainer_v2:main"
+whfm-sweep = "whfm.sweep:main"
+whfm-animate = "whfm.evaluation.animate:main"
+whfm-bridge-plot = "whfm.evaluation.gaussian_bridge_plot:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"

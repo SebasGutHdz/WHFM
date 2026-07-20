@@ -11,7 +11,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from ...models.models_v2 import FourierTimeResidualMLP
+from ..models import FourierTimeResidualMLP
 from ..Potentials import ConfiguredPotential
 from ..config import (
     BoundaryConfig,

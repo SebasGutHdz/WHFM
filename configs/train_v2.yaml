@@ -24,7 +24,7 @@ initial_fit:
   noise_std: 1.0e-4
 
 rectification:
-  num_rectifications: 15
+  num_rectifications: 5
   direction_order: [forward] #, backward
   coupling_generation: own_ema #opposite_ema
   epochs: 1000
@@ -36,8 +36,8 @@ node_solver:
 
 bridge_solver:
   kind: scipy
-  sigma_source: 1.0e-2
-  sigma_target: 1.0e-2
+  sigma_source: 1.0e-4
+  sigma_target: 1.0e-6
   bridge_steps: 50
   tol: 1.0e-2
   max_nodes: 200

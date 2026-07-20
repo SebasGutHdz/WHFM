@@ -11,5 +11,13 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-tests/
 legacy_gaussian_paths.py
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.venv/
+
+
+# Results
+results/

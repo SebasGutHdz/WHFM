@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from ..optimal_transport import OTPlanSampler
+from .optimal_transport import OTPlanSampler
 
 
 class HamiltonianFlowMatcher:

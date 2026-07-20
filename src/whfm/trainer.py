@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 import tqdm as tqdm
 
-from ..models.models_v2 import FourierTimeResidualMLP
+from .models import FourierTimeResidualMLP
 from .Potentials import ConfiguredPotential
 from .bridge import BridgeSolution, GaussianBridgeSolver
 from .config import BoundaryConfig, ProblemConfig, TrainConfig, config_to_plain_dict, dump_resolved_yaml

@@ -3,11 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 from pathlib import Path
-
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(PROJECT_ROOT))
 
 import matplotlib
 
@@ -18,13 +14,13 @@ import numpy as np
 import torch
 from torch.distributions import MultivariateNormal
 
-from torchcfm.hamiltonian import (
+from whfm import (
     CrowdNavObstaclePotential,
     KernelInteractionPotential,
     MeanStdBVPGaussianPath,
     RationalQuadraticInteractionKernel,
 )
-from torchcfm.optimal_transport import OTPlanSampler
+from whfm.optimal_transport import OTPlanSampler
 
 
 class ZeroLinearPotential:
@@ -212,7 +208,7 @@ def main():
     parser.add_argument("--sigma-guess-bump", type=float, default=0.5)
     parser.add_argument(
         "--output-dir",
-        default="torchcfm/hamiltonian/examples/stunnel_interaction_results",
+        default="examples/stunnel_interaction_results",
     )
     args = parser.parse_args()
 
@@ -303,7 +299,7 @@ def main():
 
     metrics_path = output_dir / "stunnel_interaction_metrics.json"
     metrics_path.write_text(json.dumps(metrics, indent=2))
-    report_path = Path("torchcfm/hamiltonian/examples/stunnel_interaction_report.md")
+    report_path = Path("examples/stunnel_interaction_report.md")
     write_report(report_path, metrics, args, device_message, figures)
 
     print(f"Saved metrics to {metrics_path}")

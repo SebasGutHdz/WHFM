@@ -61,31 +61,37 @@ def trajectory_quantities(model, potential, traj, time_grid: Tensor) -> Dict[str
     h_values = []
     kinetic_values = []
     potential_values = []
+    linear_potential_values = []
     for i, t_value in enumerate(time_grid.reshape(-1)):
         x_t = traj.states[i]
         t_batch = t_value.reshape(1, 1).expand(x_t.shape[0], 1)
         velocity = call_velocity_model(model, x_t, t_batch)
         kinetic = 0.5 * velocity.reshape(velocity.shape[0], -1).pow(2).sum(dim=-1)
         potential_energy = potential.energy(x_t)
+        linear_potential = potential.linear_energy(x_t)
         kinetic_values.append(kinetic)
         potential_values.append(potential_energy)
+        linear_potential_values.append(linear_potential)
         h_values.append(kinetic + potential_energy)
 
     kinetic_t = torch.stack(kinetic_values, dim=0)
     potential_t = torch.stack(potential_values, dim=0)
+    linear_potential_t = torch.stack(linear_potential_values, dim=0)
     h_t = torch.stack(h_values, dim=0)
     t = time_grid.reshape(-1)
     h0 = h_t[0]
     drift = torch.trapz((h_t - h0).abs(), t, dim=0) / (h0.abs() + 1e-6)
     kinetic_integral = torch.trapz(kinetic_t, t, dim=0)
     potential_integral = torch.trapz(potential_t, t, dim=0)
+    linear_potential_integral = torch.trapz(linear_potential_t, t, dim=0)
     action = kinetic_integral - potential_integral
     return {
         "hamiltonian_drift_integral_mean": float(drift.mean().detach().cpu()),
         "hamiltonian_drift_integral_max": float(drift.max().detach().cpu()),
         "action_mean": float(action.mean().detach().cpu()),
         "kinetic_integral_mean": float(kinetic_integral.mean().detach().cpu()),
-        "potential_integral_mean": float(potential_integral.mean().detach().cpu()),
+        "potential_integral_mean": float(potential_integral.mean().detach().cpu()), 
+        "linear_potential_integral_mean": float(linear_potential_integral.mean().detach().cpu()),
         "hamiltonian_drift_samples": drift.detach().cpu(),
     }
 

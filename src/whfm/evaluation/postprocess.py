@@ -29,6 +29,7 @@ RECTIFICATION_SERIES_METRICS = (
     "action_mean",
     "kinetic_integral_mean",
     "potential_integral_mean",
+    "linear_potential_integral_mean",
     "rectification_residual",
     "latest_loss",
 )
@@ -39,18 +40,20 @@ METRIC_TITLES = {
     "action_mean": "Mean Action of Learned Trajectories",
     "kinetic_integral_mean": "Kinetic Energy Along Learned Trajectories",
     "potential_integral_mean": "Potential Energy Along Learned Trajectories",
+    "linear_potential_integral_mean": "Obscatle Avoidance Along Learned Trajectories",
     "rectification_residual": "Change Between Consecutive Rectifications",
     "latest_loss": "Training Loss Across Rectifications",
 }
 
 METRIC_YLABELS = {
-    "sliced_w2": "Sliced Wasserstein distance",
-    "hamiltonian_drift_integral_mean": "Mean relative Hamiltonian drift",
-    "action_mean": "Mean action",
-    "kinetic_integral_mean": "Mean kinetic energy integral",
-    "potential_integral_mean": "Mean potential energy integral",
-    "rectification_residual": "Terminal residual",
-    "latest_loss": "Latest flow-matching loss",
+    "sliced_w2": r"$SW_2(\nu,\tilde{\nu})$",
+    "hamiltonian_drift_integral_mean": r"$\mathbb{E}\,\mathcal{D}_H[Z]$",
+    "action_mean": r"$\mathbb{E}\,\mathcal{A}[Z]$",
+    "kinetic_integral_mean": r"$\int_0^1 \mathbb{E}_{x\sim\mu}\left[\frac{1}{2}\|Z_t'(x)\|^2\right]\,dt$",
+    "potential_integral_mean": r"$\int_0^1 \mathcal{F}[\rho_t]\,dt$",
+    "linear_potential_integral_mean": r"$\mathbb{E}\int_0^1 V(Z_t(x))\,dt$",
+    "rectification_residual": r"$\|\pi-\mathcal{R}^H(\pi)\|$",
+    "latest_loss": r"$\mathcal{L}_{CFM}$",
 }
 
 

@@ -1,0 +1,11 @@
+name: stunnel_interaction_seed_sweep_v2
+trainer: v2
+train_config: ../train_v2.yaml
+problem_configs:
+  - ../problems/stunnel.yaml
+seeds: [0, 1, 2, 3, 4]
+gpus: [0, 1, 2, 3]
+max_parallel_per_gpu: 1
+train_overrides:
+  bridge_solver.num_workers: 8
+aggregate_metrics: [sliced_w2, sinkhorn, mmd]

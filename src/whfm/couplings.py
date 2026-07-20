@@ -8,7 +8,7 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor
 
-from ..optimal_transport import OTPlanSampler
+from .optimal_transport import OTPlanSampler
 
 
 @dataclass

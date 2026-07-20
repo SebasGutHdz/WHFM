@@ -21,6 +21,7 @@ METRIC_FIELDNAMES = [
     "action_mean",
     "kinetic_integral_mean",
     "potential_integral_mean",
+    "linear_potential_integral_mean",
     "rectification_residual",
     "latest_loss",
     "bridge_success_rate",
