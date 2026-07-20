@@ -16,6 +16,7 @@ from ..Potentials import ConfiguredPotential
 from ..bridge import GaussianBridgeSolver
 from ..config import load_problem_config, load_train_config
 from ..node import NodeSolver
+from .checkpoint import load_checkpoint
 from .animate import (
     _build_model,
     _json_ready,
@@ -76,7 +77,7 @@ def create_gaussian_bridge_visualizations(
     resolved_device = _resolve_device(device or train_config.device)
 
     checkpoint_path = resolve_checkpoint_path(run_dir, checkpoint)
-    checkpoint_state = torch.load(checkpoint_path, map_location=resolved_device, weights_only=False)
+    checkpoint_state = load_checkpoint(checkpoint_path, map_location=resolved_device)
     specs = available_model_specs(checkpoint_state, direction=direction, model_kind=model_kind)
 
     potential = ConfiguredPotential(problem_config.functional.to_potential_cfg())

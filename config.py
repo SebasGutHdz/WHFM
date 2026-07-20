@@ -58,6 +58,15 @@ def _plain(value: Any) -> Any:
     return value
 
 
+def config_to_plain_dict(config: Any) -> Dict[str, Any]:
+    """Return a YAML-compatible plain dictionary for a config dataclass."""
+
+    plain = _plain(config)
+    if not isinstance(plain, Mapping):
+        raise TypeError("config_to_plain_dict expects a dataclass or mapping config.")
+    return dict(plain)
+
+
 def _plain_functional_component(value: Any) -> Optional[Dict[str, Any]]:
     if value is None:
         return None
@@ -70,6 +79,20 @@ def _plain_functional_component(value: Any) -> Optional[Dict[str, Any]]:
         "coefficient": _plain(coefficient),
         "parameters": _plain({} if parameters is None else parameters),
     }
+
+
+def _resolve_cuda_device(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("cuda_device must be an integer CUDA device index or null.")
+    try:
+        index = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("cuda_device must be an integer CUDA device index or null.") from exc
+    if index < 0:
+        raise ValueError("cuda_device must be nonnegative.")
+    return index
 
 
 @dataclass(frozen=True)
@@ -347,10 +370,12 @@ class TrainConfig:
     optimization: OptimizationConfig
     ema: EMAConfig
     output: OutputConfig
+    cuda_device: Optional[int] = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "TrainConfig":
-        data = _require_mapping(data, "train config")
+        data = dict(_require_mapping(data, "train config"))
+        data.setdefault("cuda_device", None)
         allowed = {field.name for field in fields(cls)}
         extra = set(data) - allowed
         missing = allowed - set(data)
@@ -364,9 +389,11 @@ class TrainConfig:
         dtype = str(data["dtype"])
         if dtype not in {"float32", "float64"}:
             raise ValueError("dtype must be 'float32' or 'float64'.")
+        cuda_device = _resolve_cuda_device(data["cuda_device"])
+        device = f"cuda:{cuda_device}" if cuda_device is not None else str(data["device"])
         cfg = cls(
             seed=int(data["seed"]),
-            device=str(data["device"]),
+            device=device,
             dtype=dtype,
             data=DataConfig.from_dict(data["data"]),
             model=ModelConfig.from_dict(data["model"]),
@@ -377,6 +404,7 @@ class TrainConfig:
             optimization=OptimizationConfig.from_dict(data["optimization"]),
             ema=EMAConfig.from_dict(data["ema"]),
             output=OutputConfig.from_dict(data["output"]),
+            cuda_device=cuda_device,
         )
         if cfg.bridge_solver.bridge_steps > cfg.node_solver.node_steps:
             raise ValueError("bridge_solver.bridge_steps must be <= node_solver.node_steps.")

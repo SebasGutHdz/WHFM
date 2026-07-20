@@ -19,15 +19,16 @@ import tqdm as tqdm
 from ..models.models_v2 import FourierTimeResidualMLP
 from .Potentials import ConfiguredPotential
 from .bridge import BridgeSolution, GaussianBridgeSolver
-from .config import BoundaryConfig, ProblemConfig, TrainConfig, dump_resolved_yaml
+from .config import BoundaryConfig, ProblemConfig, TrainConfig, config_to_plain_dict, dump_resolved_yaml
 from .couplings import Coupler
 from .datasets import _dataset_samples
 from .directions import Direction, DirectionState
 from .evaluation import (
     append_metrics_row,
     append_warmup_metrics_row,
-    evaluate_model,
-    evaluate_warmup_model,
+    evaluate_model_with_terminal,
+    evaluate_warmup_model_with_terminal,
+    postprocess_rectification_results,
     save_bridge_solution_plots,
 )
 from .losses import flow_matching_loss
@@ -120,10 +121,14 @@ class HamiltonianTrainer:
             "diagnostics": [],
             "evaluation": [],
             "warmup": [],
+            "postprocess": {},
+            "best_sliced_w2": None,
         }
         self.stage = "created"
         self.completed_passes = []
         self._diagnostic_saved = set()
+        self._previous_terminal_paths = {}
+        self._best_sliced_w2 = math.inf
         self.run_dir = self._create_run_dir()
         dump_resolved_yaml(self.run_dir / "resolved_train.yaml", train_config)
         dump_resolved_yaml(self.run_dir / "resolved_problem.yaml", problem_config)
@@ -135,11 +140,17 @@ class HamiltonianTrainer:
         print("Finished initial fit")
         for state in self.states.values():
             state.initialize_ema(self.train_config.ema)
-        self.evaluate_warmup()
+        self.evaluate_warmup(model_kinds=("online", "ema"), plot_mode="trajectory")
 
         self.stage = "rectification"
         print("Starting rectifications")
         self.run_rectifications()
+        self.metrics["postprocess"] = postprocess_rectification_results(
+            self.run_dir,
+            self.metrics["evaluation"],
+            self.problem.potential,
+            self.problem_config.evaluation,
+        )
         self.stage = "complete"
         self.save_metrics()
         self.save_checkpoint("final", rectification_index=None, direction=None)
@@ -389,36 +400,77 @@ class HamiltonianTrainer:
                 state.ema.update(state.model)
             self.metrics["losses"][state.direction.value].append(float(loss.detach().cpu()))
 
-    def evaluate_warmup(self) -> None:
+    def evaluate_warmup(
+        self,
+        *,
+        epoch: int | None = None,
+        model_kinds: tuple[str, ...] = ("online", "ema"),
+        save_plots: bool = True,
+        plot_mode: str = "full",
+    ) -> None:
         source_test = self.dataset["source_test"]
         target_test = self.dataset["target_test"]
         if source_test.shape[0] == 0 or target_test.shape[0] == 0:
             return
         if self.mode == "own_ema":
-            self._evaluate_warmup_direction(Direction.FORWARD, source_test, target_test)
+            self._evaluate_warmup_direction(
+                Direction.FORWARD,
+                source_test,
+                target_test,
+                epoch=epoch,
+                model_kinds=model_kinds,
+                save_plots=save_plots,
+                plot_mode=plot_mode,
+            )
             return
-        self._evaluate_warmup_direction(Direction.FORWARD, source_test, target_test)
-        self._evaluate_warmup_direction(Direction.BACKWARD, target_test, source_test)
+        self._evaluate_warmup_direction(
+            Direction.FORWARD,
+            source_test,
+            target_test,
+            epoch=epoch,
+            model_kinds=model_kinds,
+            save_plots=save_plots,
+            plot_mode=plot_mode,
+        )
+        self._evaluate_warmup_direction(
+            Direction.BACKWARD,
+            target_test,
+            source_test,
+            epoch=epoch,
+            model_kinds=model_kinds,
+            save_plots=save_plots,
+            plot_mode=plot_mode,
+        )
 
     def _evaluate_warmup_direction(
         self,
         direction: Direction,
         source_test: Tensor,
         target_test: Tensor,
+        *,
+        epoch: int | None,
+        model_kinds: tuple[str, ...],
+        save_plots: bool,
+        plot_mode: str,
     ) -> None:
         state = self.states[direction]
         losses = self.metrics["losses"].get(direction.value, [])
         latest_loss = losses[-1] if losses else float("nan")
-        models = [("online", state.model)]
+        available_models = {"online": state.model}
         if state.ema is not None:
-            models.append(("ema", state.ema.ema_model))
+            available_models["ema"] = state.ema.ema_model
         figures_dir = self.run_dir / "figures" / "warmup"
-        samples_dir = self.run_dir / "samples" / "warmup"
+        samples_dir = self.run_dir / "samples"
         csv_path = self.run_dir / "metrics" / "warmup_metrics.csv"
-        for model_kind, model in models:
+        for model_kind in model_kinds:
+            model = available_models.get(model_kind)
+            if model is None:
+                continue
+            key = (direction.value, model_kind)
+            previous_terminal_path = self._previous_terminal_paths.get(key)
             was_training = model.training
             model.eval()
-            row = evaluate_warmup_model(
+            row, terminal_path = evaluate_warmup_model_with_terminal(
                 model=model,
                 model_kind=model_kind,
                 direction=direction.value,
@@ -430,7 +482,12 @@ class HamiltonianTrainer:
                 latest_warmup_loss=latest_loss,
                 figures_dir=figures_dir,
                 samples_dir=samples_dir,
+                epoch=epoch,
+                previous_terminal_path=previous_terminal_path,
+                save_plots=save_plots,
+                plot_mode=plot_mode,
             )
+            self._previous_terminal_paths[key] = terminal_path
             append_warmup_metrics_row(csv_path, row)
             self.metrics["warmup"].append(row)
             if was_training:
@@ -480,10 +537,13 @@ class HamiltonianTrainer:
         if state.ema is not None:
             models.append(("ema", state.ema.ema_model))
         figures_dir = self.run_dir / "figures" / "evaluation"
+        samples_dir = self.run_dir / "samples"
         for model_kind, model in models:
+            key = (direction.value, model_kind)
+            previous_terminal_path = self._previous_terminal_paths.get(key)
             was_training = model.training
             model.eval()
-            row = evaluate_model(
+            row, terminal_path = evaluate_model_with_terminal(
                 model=model,
                 model_kind=model_kind,
                 direction=direction.value,
@@ -496,11 +556,37 @@ class HamiltonianTrainer:
                 latest_loss=latest_loss,
                 bridge_metrics=self.metrics["bridge"],
                 figures_dir=figures_dir,
+                samples_dir=samples_dir,
+                previous_terminal_path=previous_terminal_path,
             )
+            if terminal_path is not None:
+                self._previous_terminal_paths[key] = terminal_path
             append_metrics_row(csv_path, row)
             self.metrics["evaluation"].append(row)
+            self._maybe_update_best_sliced_w2(row)
             if was_training:
                 model.train()
+
+    def _checkpoint_state(
+        self,
+        tag: str,
+        *,
+        rectification_index: int | None,
+        direction: Direction | None,
+    ) -> Dict[str, object]:
+        return {
+            "tag": tag,
+            "stage": self.stage,
+            "rectification_index": rectification_index,
+            "direction": None if direction is None else direction.value,
+            "completed_passes": list(self.completed_passes),
+            "train_config": config_to_plain_dict(self.train_config),
+            "problem_config": config_to_plain_dict(self.problem_config),
+            "directions": {key.value: value.state_dict() for key, value in self.states.items()},
+            "rng_state": torch.get_rng_state(),
+            "cuda_rng_state_all": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "metrics": self.metrics,
+        }
 
     def save_checkpoint(
         self,
@@ -517,22 +603,70 @@ class HamiltonianTrainer:
         if direction is not None:
             suffix += f"_{direction.value}"
         path = checkpoint_dir / f"{suffix}.pt"
-        state = {
-            "tag": tag,
-            "stage": self.stage,
-            "rectification_index": rectification_index,
-            "direction": None if direction is None else direction.value,
-            "completed_passes": list(self.completed_passes),
-            "train_config": self.train_config,
-            "problem_config": self.problem_config,
-            "directions": {key.value: value.state_dict() for key, value in self.states.items()},
-            "rng_state": torch.get_rng_state(),
-            "cuda_rng_state_all": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-            "metrics": self.metrics,
-        }
-        torch.save(state, path)
+        torch.save(
+            self._checkpoint_state(
+                tag,
+                rectification_index=rectification_index,
+                direction=direction,
+            ),
+            path,
+        )
         self.metrics["checkpoints"].append(str(path))
         return path
+
+    @staticmethod
+    def _finite_metric(value) -> float | None:
+        try:
+            metric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(metric):
+            return None
+        return metric
+
+    def _direction_from_row(self, row: Dict[str, object]) -> Direction | None:
+        value = row.get("direction")
+        try:
+            return Direction(str(value))
+        except (TypeError, ValueError):
+            return None
+
+    def _maybe_update_best_sliced_w2(self, row: Dict[str, object]) -> None:
+        sliced_w2 = self._finite_metric(row.get("sliced_w2"))
+        if sliced_w2 is None or sliced_w2 >= self._best_sliced_w2:
+            return
+        self._best_sliced_w2 = sliced_w2
+        self._save_best_sliced_w2_checkpoint(row, sliced_w2)
+
+    def _save_best_sliced_w2_checkpoint(self, row: Dict[str, object], sliced_w2: float) -> None:
+        checkpoint_dir = self.run_dir / "checkpoints"
+        metrics_dir = self.run_dir / "metrics"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_path = checkpoint_dir / "best_sliced_w2.pt"
+        metadata_path = metrics_dir / "best_sliced_w2.json"
+        metadata = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "rectification_index": row.get("rectification_index"),
+            "direction": row.get("direction"),
+            "model_kind": row.get("model_kind"),
+            "sliced_w2": sliced_w2,
+            "checkpoint_path": str(checkpoint_path),
+            "metrics_row": dict(row),
+        }
+        self.metrics["best_sliced_w2"] = metadata
+        checkpoint_value = str(checkpoint_path)
+        if checkpoint_value not in self.metrics["checkpoints"]:
+            self.metrics["checkpoints"].append(checkpoint_value)
+        state = self._checkpoint_state(
+            "best_sliced_w2",
+            rectification_index=row.get("rectification_index"),
+            direction=self._direction_from_row(row),
+        )
+        state["best_sliced_w2"] = metadata
+        torch.save(state, checkpoint_path)
+        with metadata_path.open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, indent=2)
 
     def save_metrics(self) -> Path:
         metrics_dir = self.run_dir / "metrics"

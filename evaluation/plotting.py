@@ -349,7 +349,10 @@ def save_warmup_plots(
     potential,
     source_reference: Tensor,
     evaluation_config,
+    plot_mode: str = "full",
 ) -> Dict[str, str]:
+    if plot_mode not in {"full", "trajectory"}:
+        raise ValueError("warmup plot_mode must be 'full' or 'trajectory'.")
     figures_dir.mkdir(parents=True, exist_ok=True)
     count = min(int(evaluation_config.plot_trajectory_count), traj.shape[1])
     if count <= 0:
@@ -410,6 +413,12 @@ def save_warmup_plots(
     _style_axis(ax)
     fig.savefig(trajectory_path, bbox_inches="tight", dpi=PUBLICATION_DPI)
     plt.close(fig)
+    if plot_mode == "trajectory":
+        return {
+            "trajectory_plot": str(trajectory_path),
+            "linear_potential_plot": "",
+            "terminal_scatter_plot": "",
+        }
 
     fig, ax = _publication_subplots(plt)
     _plot_linear_contour(

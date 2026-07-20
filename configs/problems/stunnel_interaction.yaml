@@ -7,20 +7,20 @@ boundaries:
     name: 2d_gaussian
     parameters:
       mean: [-11.0, -1.0]
-      std: 0.5
+      std: 0.707
     sample_noise: 0.0
   target:
     kind: dataset
     name: 2d_gaussian
     parameters:
       mean: [11.0, 1.0]
-      std: 0.5
+      std: 0.707
     sample_noise: 0.0
 
 functional:
-  linear: [stunnel, -35.0]
+  linear: [stunnel, -30.0]
   internal: null
-  interaction: ['rational_quadratic',-7.5]
+  interaction: ['rational_quadratic',-1.0]
 
 evaluation:
   num_samples: 3000

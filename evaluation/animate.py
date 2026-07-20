@@ -22,7 +22,8 @@ from ..config import (
 )
 from ..datasets import _dataset_samples
 from ..node import NodeSolver
-from .model import cap_pair, distribution_summary, terminal_summary, trajectory_quantities
+from .checkpoint import load_checkpoint
+from .model import cap_pair, distribution_summary, trajectory_quantities
 from .plotting import (
     PUBLICATION_GIF_CURRENT_MARKER_SIZE,
     PUBLICATION_GIF_FIGSIZE,
@@ -131,7 +132,7 @@ def create_particle_evolution_gifs(
     resolved_device = _resolve_device(device or train_config.device)
 
     checkpoint_path = resolve_checkpoint_path(run_dir, checkpoint)
-    checkpoint_state = torch.load(checkpoint_path, map_location=resolved_device, weights_only=False)
+    checkpoint_state = load_checkpoint(checkpoint_path, map_location=resolved_device)
     specs = available_model_specs(checkpoint_state, direction=direction, model_kind=model_kind)
 
     potential = ConfiguredPotential(problem_config.functional.to_potential_cfg())
@@ -212,7 +213,6 @@ def create_particle_evolution_gifs(
                 generator=generator,
             )
         )
-        row.update(terminal_summary(generated, reference))
         row.update(
             {
                 key: value

@@ -28,8 +28,8 @@ functional:
     parameters:
       fixed_position: [0.0, 0.0]
       G: 100.0
-      central_mass: 5.0
-      moving_mass: 100.0
+      central_mass: 100.0
+      moving_mass: 1.0
       epsilon: 0.01
       n_moving: 2
       particle_dim: 2

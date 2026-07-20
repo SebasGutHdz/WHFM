@@ -10,12 +10,16 @@ from .io import (
 from .model import (
     bridge_summary,
     cap_pair,
-    covariance_matrix,
     distribution_summary,
     evaluate_model,
+    evaluate_model_with_terminal,
     evaluate_warmup_model,
+    evaluate_warmup_model_with_terminal,
     integrate_model,
-    terminal_summary,
+    load_terminal_output,
+    rectification_residual,
+    rectification_residual_from_file,
+    save_evaluation_artifacts,
     trajectory_quantities,
 )
 from .animate import (
@@ -24,6 +28,12 @@ from .animate import (
     create_particle_evolution_gifs,
     main as animate_main,
     resolve_checkpoint_path,
+)
+from .postprocess import (
+    RECTIFICATION_SERIES_METRICS,
+    plot_rectification_metric_series,
+    plot_rectification_residual_samples,
+    postprocess_rectification_results,
 )
 from .plotting import (
     POTENTIAL_COLORMAP,
@@ -42,6 +52,7 @@ from .plotting import (
 
 __all__ = [
     "POTENTIAL_COLORMAP",
+    "RECTIFICATION_SERIES_METRICS",
     "TIME_COLORMAP",
     "METRIC_FIELDNAMES",
     "WARMUP_METRIC_FIELDNAMES",
@@ -59,19 +70,26 @@ __all__ = [
     "bridge_summary",
     "build_parser",
     "cap_pair",
-    "covariance_matrix",
     "create_particle_evolution_gifs",
     "distribution_summary",
     "evaluate_model",
+    "evaluate_model_with_terminal",
     "evaluate_warmup_model",
+    "evaluate_warmup_model_with_terminal",
     "integrate_model",
+    "load_terminal_output",
     "MMD_loss",
     "save_bridge_solution_plots",
     "save_evaluation_plots",
     "save_warmup_plots",
     "sinkhorn",
     "sliced_wasserstein2",
+    "rectification_residual",
+    "rectification_residual_from_file",
+    "plot_rectification_metric_series",
+    "plot_rectification_residual_samples",
+    "postprocess_rectification_results",
     "resolve_checkpoint_path",
-    "terminal_summary",
+    "save_evaluation_artifacts",
     "trajectory_quantities",
 ]

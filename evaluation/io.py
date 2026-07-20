@@ -21,9 +21,7 @@ METRIC_FIELDNAMES = [
     "action_mean",
     "kinetic_integral_mean",
     "potential_integral_mean",
-    "terminal_mean_error",
-    "terminal_cov_error",
-    "terminal_displacement_mean",
+    "rectification_residual",
     "latest_loss",
     "bridge_success_rate",
     "bridge_failed_pairs",
@@ -31,24 +29,29 @@ METRIC_FIELDNAMES = [
     "linear_potential_plot",
     "terminal_scatter_plot",
     "hamiltonian_histogram_plot",
+    "trajectory_path",
+    "terminal_path",
+    "previous_terminal_path",
 ]
 
 WARMUP_METRIC_FIELDNAMES = [
     "timestamp",
+    "epoch",
     "direction",
     "model_kind",
     "num_eval_samples",
     "sliced_w2",
     "sinkhorn",
     "mmd",
-    "terminal_mean_error",
-    "terminal_cov_error",
-    "terminal_displacement_mean",
+    "rectification_residual",
     "latest_warmup_loss",
     "trajectory_plot",
     "linear_potential_plot",
     "terminal_scatter_plot",
     "sample_path",
+    "trajectory_path",
+    "terminal_path",
+    "previous_terminal_path",
 ]
 
 
