@@ -7,14 +7,14 @@ boundaries:
     name: 2d_gaussian
     parameters:
       mean: [-11.0, -1.0]
-      std: 0.7071 #4472135955
+      std: 0.7071 # 4472135955 #
     sample_noise: 0.0
   target:
     kind: dataset
     name: 2d_gaussian
     parameters:
       mean: [11.0, 1.0]
-      std: 0.7071 #4472135955
+      std: 0.7071 # 4472135955 #
     sample_noise: 0.0
 
 functional:

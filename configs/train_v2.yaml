@@ -8,9 +8,9 @@ data:
   num_workers: 0
   shuffle: true
   drop_last: false
-  total_samples: 4096
+  total_samples: 8192
   test_fraction: 0.2
-  n_dataset: 2048
+  n_dataset: 4096
 
 model:
   width: 512
@@ -19,15 +19,15 @@ model:
 
 initial_fit:
   coupling: ot
-  epochs: 100
+  epochs: 250
   steps_per_batch: 1
   noise_std: 1.0e-4
 
 rectification:
-  num_rectifications: 5
+  num_rectifications: 8
   direction_order: [forward] #, backward
   coupling_generation: own_ema #opposite_ema
-  epochs: 1000
+  epochs: 1500
   ema_target_refresh: per_direction_pass
 
 node_solver:
@@ -37,14 +37,14 @@ node_solver:
 bridge_solver:
   kind: scipy
   sigma_source: 1.0e-4
-  sigma_target: 1.0e-6
+  sigma_target: 1.0e-4
   bridge_steps: 50
   tol: 1.0e-2
   max_nodes: 200
   quadrature_order: 3
   use_monte_carlo: true
   monte_carlo_samples: 10
-  entropy_density_std_floor: 5.0
+  entropy_density_std_floor: 1.5
   n_density_samples: 128
   num_workers: 32
   failure_policy: skip_pair

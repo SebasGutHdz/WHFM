@@ -3,9 +3,9 @@ trainer: v2
 train_config: ../train_v2.yaml
 problem_configs:
   - ../problems/vneck_entropy.yaml
-seeds: [0, 1, 2, 3, 4]
-gpus: [1, 2]
+seeds: [0, 1, 2, 3]
+gpus: [2, 3]
 max_parallel_per_gpu: 1
 train_overrides:
-  bridge_solver.num_workers: 8
-aggregate_metrics: [sliced_w2, action_mean, rectification_residual,latest_loss]
+  bridge_solver.num_workers: 16
+aggregate_metrics: [sliced_w2,sinkhorn, action_mean,kinetic_integral_mean,linear_potential_integral_mean,potential_integral_mean,rectification_residual]

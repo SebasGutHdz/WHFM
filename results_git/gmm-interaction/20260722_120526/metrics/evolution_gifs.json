@@ -1,0 +1,38 @@
+[
+  {
+    "timestamp": "2026-07-22T13:45:35",
+    "run_dir": "results/gmm_interaction/20260722_120526",
+    "checkpoint": "results/gmm_interaction/20260722_120526/checkpoints/final.pt",
+    "direction": "forward",
+    "model_kind": "online",
+    "num_eval_samples": 1000,
+    "gif_path": "results/gmm_interaction/20260722_120526/figures/evolution_gifs/forward_online_final_evolution.gif",
+    "sliced_w2": 0.22037364542484283,
+    "sinkhorn": 0.1204921156167984,
+    "mmd": 0.00400678813457489,
+    "hamiltonian_drift_integral_mean": 0.07716231048107147,
+    "hamiltonian_drift_integral_max": 15.564325332641602,
+    "action_mean": 78.52326965332031,
+    "kinetic_integral_mean": 73.91376495361328,
+    "potential_integral_mean": -4.609512805938721,
+    "linear_potential_integral_mean": -4.580439567565918
+  },
+  {
+    "timestamp": "2026-07-22T13:47:50",
+    "run_dir": "results/gmm_interaction/20260722_120526",
+    "checkpoint": "results/gmm_interaction/20260722_120526/checkpoints/final.pt",
+    "direction": "forward",
+    "model_kind": "ema",
+    "num_eval_samples": 1000,
+    "gif_path": "results/gmm_interaction/20260722_120526/figures/evolution_gifs/forward_ema_final_evolution.gif",
+    "sliced_w2": 0.22535893321037292,
+    "sinkhorn": 0.12051136791706085,
+    "mmd": 0.004008169285953045,
+    "hamiltonian_drift_integral_mean": 0.07689706981182098,
+    "hamiltonian_drift_integral_max": 15.553376197814941,
+    "action_mean": 78.50537872314453,
+    "kinetic_integral_mean": 73.91353607177734,
+    "potential_integral_mean": -4.591843128204346,
+    "linear_potential_integral_mean": -4.562513828277588
+  }
+]

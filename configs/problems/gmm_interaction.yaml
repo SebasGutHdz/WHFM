@@ -1,0 +1,37 @@
+name: gmm_interaction
+dimension: 2
+
+boundaries:
+  source:
+    kind: dataset
+    name: gaussians
+    parameters:
+      n_gaussians: 8
+      radius: 16
+      std_gaussians: 1.0
+    sample_noise: 0.0
+  target:
+    kind: dataset
+    name: gaussians
+    parameters:
+      n_gaussians: 4
+      radius: 4
+      std_gaussians: 1.0
+    sample_noise: 0.0
+
+functional:
+  linear: [gmm, -150.0]
+  internal: null
+  interaction: ['rational_quadratic',-0.5]
+
+evaluation:
+  num_samples: 3000
+  max_metric_samples: 1000
+  num_sliced_projections: 128
+  mmd_bandwidth: null
+  plot_trajectory_count: 512
+  plot_dir1: 0
+  plot_dir2: 1
+  plot_xlim: [0.0, 0.0]
+  plot_ylim: [0.0, 0.0]
+  xaxis_hist: 0.4

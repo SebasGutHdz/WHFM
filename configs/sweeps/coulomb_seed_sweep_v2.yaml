@@ -3,9 +3,9 @@ trainer: v2
 train_config: ../train_v2.yaml
 problem_configs:
   - ../problems/coulomb.yaml
-seeds: [0, 1, 2, 3, 4]
-gpus: [0, 1, 2, 3]
+seeds: [0, 1, 2]
+gpus: [0, 1]
 max_parallel_per_gpu: 1
 train_overrides:
   bridge_solver.num_workers: 8
-aggregate_metrics: [sliced_w2, action_mean,rectification_residual ]
+aggregate_metrics: [sliced_w2, action_mean,kinetic_integral_mean,linear_potential_integral_mean,potential_integral_mean,rectification_residual ]

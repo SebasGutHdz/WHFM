@@ -1,0 +1,63 @@
+seed: 0
+device: auto
+dtype: float32
+data:
+  batch_size: 1024
+  num_workers: 0
+  shuffle: true
+  drop_last: false
+  total_samples: 8192
+  test_fraction: 0.2
+  n_dataset: 4096
+model:
+  width: 512
+  hidden: 4
+  fourier_modes: 6
+initial_fit:
+  coupling: ot
+  epochs: 250
+  steps_per_batch: 1
+  noise_std: 0.0001
+rectification:
+  num_rectifications: 8
+  direction_order:
+  - forward
+  coupling_generation: own_ema
+  epochs: 1500
+  ema_target_refresh: per_direction_pass
+node_solver:
+  method: euler
+  node_steps: 1000
+bridge_solver:
+  kind: scipy
+  sigma: null
+  sigma_source: 0.0001
+  sigma_target: 0.0001
+  bridge_steps: 50
+  tol: 0.01
+  max_nodes: 200
+  quadrature_order: 3
+  use_monte_carlo: true
+  monte_carlo_samples: 10
+  n_density_samples: 128
+  n_reference_grid: null
+  entropy_density_std_floor: 1.5
+  num_workers: 32
+  failure_policy: skip_pair
+optimization:
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  scheduler:
+    kind: cosine
+    min_lr: 0.0
+ema:
+  mode: fixed
+  decay: 0.95
+  gamma: 6.99
+output:
+  root: results
+  run_name: null
+  checkpoint_every_direction_pass: true
+  save_figures: true
+  diagnostic_plot_count: 24
+cuda_device: null
