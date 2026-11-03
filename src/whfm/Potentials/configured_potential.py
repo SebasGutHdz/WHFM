@@ -89,7 +89,7 @@ class ConfiguredPotential(Potential):
             parameters = {}
         if not isinstance(parameters, dict):
             raise TypeError(f"cfg['{key}'][2] must be a parameters dict.")
-        if key == "linear":
+        if key in {"linear", "internal"}:
             component = builder(name, parameters)
         elif parameters:
             raise ValueError(f"cfg['{key}'] does not support parameters yet.")
@@ -138,7 +138,21 @@ class ConfiguredPotential(Potential):
         coefficient = _as_like(self.internal_coefficient, x)
         return coefficient * self.internal.score_from_gaussian_mixture(x, means, stds)
 
+    def internal_gradient_from_empirical_samples(
+        self, x: Tensor, samples: Tensor
+    ) -> Tensor:
+        if self.internal is None:
+            return torch.zeros_like(x)
+        if not hasattr(self.internal, "score_from_empirical_samples"):
+            raise TypeError(
+                f"Internal potential '{self.internal_name}' does not provide "
+                "score_from_empirical_samples(x, samples)."
+            )
+        coefficient = _as_like(self.internal_coefficient, x)
+        return coefficient * self.internal.score_from_empirical_samples(x, samples)
+
     def interaction_energy(self, x: Tensor, y: Tensor = None) -> Tensor:
+        """Return ``(c / 2) W(x, y)`` for the symmetric interaction energy."""
         if self.interaction is None:
             return self._zeros(x)
         y = self._shuffled_batch(x) if y is None else y
@@ -146,6 +160,12 @@ class ConfiguredPotential(Potential):
         return coefficient * self.interaction.interaction_energy(x, y)
 
     def interaction_gradient(self, x: Tensor, y: Tensor = None) -> Tensor:
+        """Return ``c grad_x W(x, y)`` for the functional first variation.
+
+        Differentiating the symmetric double integral cancels the energy's
+        factor ``1 / 2``. The Gaussian BVP consumes this already-configured
+        gradient and therefore must not apply the coefficient again.
+        """
         if self.interaction is None:
             return torch.zeros_like(x)
         y = self._shuffled_batch(x) if y is None else y

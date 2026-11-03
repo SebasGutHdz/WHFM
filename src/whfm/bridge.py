@@ -39,6 +39,14 @@ class BridgeSolution:
     solver_iterations: list[Optional[int]]
     solver_mesh_nodes: list[Optional[int]]
     guess_source: str
+    initial_guess_terminal_errors: Tensor | None = None
+    terminal_location_correction_errors: Tensor | None = None
+    entropy_reference_iterations: int = 0
+    entropy_reference_converged: Optional[bool] = None
+    entropy_reference_final_delta: Optional[float] = None
+    entropy_reference_delta_history: tuple[float, ...] = ()
+    entropy_reference_component_fallbacks: int = 0
+    entropy_reference_component_indices: tuple[int, ...] = ()
 
     @property
     def num_pairs(self) -> int:
@@ -68,6 +76,9 @@ class GaussianBridgeSolver:
         n_density_samples: int = 1,
         n_reference_grid: int | None = None,
         entropy_density_std_floor: float | None = None,
+        entropy_reference_max_iterations: int = 1,
+        entropy_reference_tolerance: float = 1e-3,
+        entropy_reference_relaxation: float = 0.5,
         num_workers: int = 1,
         failure_policy: str = "skip_pair",
     ):
@@ -79,6 +90,12 @@ class GaussianBridgeSolver:
             raise ValueError("n_reference_grid must be at least 2 when provided.")
         if entropy_density_std_floor is not None and entropy_density_std_floor <= 0.0:
             raise ValueError("entropy_density_std_floor must be positive when provided.")
+        if entropy_reference_max_iterations <= 0:
+            raise ValueError("entropy_reference_max_iterations must be positive.")
+        if entropy_reference_tolerance <= 0.0:
+            raise ValueError("entropy_reference_tolerance must be positive.")
+        if not 0.0 < entropy_reference_relaxation <= 1.0:
+            raise ValueError("entropy_reference_relaxation must be in (0, 1].")
         if num_workers < 0:
             raise ValueError("num_workers must be nonnegative.")
         if (sigma_source is None) != (sigma_target is None):
@@ -93,8 +110,10 @@ class GaussianBridgeSolver:
             sigma_value = None if sigma is None else float(sigma)
             sigma_source = float(sigma_source)
             sigma_target = float(sigma_target)
-        if sigma_source <= 0.0 or sigma_target <= 0.0:
-            raise ValueError("sigma endpoints must be positive.")
+        if sigma_source <= 0.0:
+            raise ValueError("sigma_source must be positive.")
+        if sigma_target < 0.0:
+            raise ValueError("sigma_target must be nonnegative.")
         self.potential = potential
         self.sigma = sigma_value
         self.sigma_source = sigma_source
@@ -110,6 +129,9 @@ class GaussianBridgeSolver:
         self.entropy_density_std_floor = (
             None if entropy_density_std_floor is None else float(entropy_density_std_floor)
         )
+        self.entropy_reference_max_iterations = int(entropy_reference_max_iterations)
+        self.entropy_reference_tolerance = float(entropy_reference_tolerance)
+        self.entropy_reference_relaxation = float(entropy_reference_relaxation)
         self.num_workers = int(num_workers)
         self.failure_policy = failure_policy
 
@@ -131,6 +153,9 @@ class GaussianBridgeSolver:
             guess_source = "straight_line"
         else:
             guess_source = "partial_learned_trajectory"
+        initial_guess_terminal_errors = self._initial_guess_terminal_errors(
+            mean_guess, x1_detached
+        )
 
         path = MeanStdBVPGaussianPath(
             self.potential,
@@ -145,7 +170,11 @@ class GaussianBridgeSolver:
             n_density_samples=self.n_density_samples,
             n_reference_grid=self.n_reference_grid,
             entropy_density_std_floor=self.entropy_density_std_floor,
+            entropy_reference_max_iterations=self.entropy_reference_max_iterations,
+            entropy_reference_tolerance=self.entropy_reference_tolerance,
+            entropy_reference_relaxation=self.entropy_reference_relaxation,
             num_workers=self.num_workers,
+            failure_policy=self.failure_policy,
             mu_guess=mean_guess,
             mu_dot_guess=mean_velocity_guess,
             sigma_guess=std_guess,
@@ -157,9 +186,11 @@ class GaussianBridgeSolver:
         except RuntimeError:
             if self.failure_policy == "raise":
                 raise
+            solve_metadata = dict(getattr(path, "solve_metadata", {}) or {})
             failure_messages = dict(path.failure_messages)
-            path._record_solve_metadata(x0_detached.shape[0], [], {})
-            path.failure_messages = failure_messages
+            path._record_solve_metadata(
+                x0_detached.shape[0], [], failure_messages, solve_metadata
+            )
             states = torch.empty(
                 (0, self.bridge_steps + 1, 2 * x0_detached.reshape(x0_detached.shape[0], -1).shape[1] + 2),
                 dtype=x0_detached.detach().cpu().dtype,
@@ -193,6 +224,26 @@ class GaussianBridgeSolver:
         pair_solve_times = list(solve_metadata.get("pair_solve_time_seconds", []))
         solver_iterations = list(solve_metadata.get("pair_solver_iterations", []))
         solver_mesh_nodes = list(solve_metadata.get("pair_solver_mesh_nodes", []))
+        entropy_reference_iterations = int(
+            solve_metadata.get("entropy_reference_iterations", 0)
+        )
+        entropy_reference_converged = solve_metadata.get(
+            "entropy_reference_converged"
+        )
+        entropy_reference_final_delta = solve_metadata.get(
+            "entropy_reference_final_delta"
+        )
+        entropy_reference_delta_history = tuple(
+            float(value)
+            for value in solve_metadata.get("entropy_reference_delta_history", [])
+        )
+        entropy_reference_component_fallbacks = int(
+            solve_metadata.get("entropy_reference_component_fallbacks", 0)
+        )
+        entropy_reference_component_indices = tuple(
+            int(value)
+            for value in solve_metadata.get("entropy_reference_component_indices", [])
+        )
         solve_time_seconds = float(solve_metadata.get("total_solve_time_seconds", float("nan")))
         return BridgeSolution(
             time_grid=time_grid,
@@ -214,7 +265,27 @@ class GaussianBridgeSolver:
             solver_iterations=solver_iterations,
             solver_mesh_nodes=solver_mesh_nodes,
             guess_source=guess_source,
+            initial_guess_terminal_errors=initial_guess_terminal_errors,
+            entropy_reference_iterations=entropy_reference_iterations,
+            entropy_reference_converged=entropy_reference_converged,
+            entropy_reference_final_delta=entropy_reference_final_delta,
+            entropy_reference_delta_history=entropy_reference_delta_history,
+            entropy_reference_component_fallbacks=entropy_reference_component_fallbacks,
+            entropy_reference_component_indices=entropy_reference_component_indices,
         )
+
+    @staticmethod
+    def _initial_guess_terminal_errors(mean_guess, x1: Tensor) -> Tensor | None:
+        if mean_guess is None:
+            return None
+        guess = torch.as_tensor(mean_guess, device=x1.device, dtype=x1.dtype)
+        x1_flat = x1.reshape(x1.shape[0], -1)
+        expected_shape = (x1_flat.shape[0], guess.shape[1], x1_flat.shape[1])
+        if tuple(guess.shape) != expected_shape:
+            raise ValueError(
+                f"mean_guess must have shape {expected_shape}; got {tuple(guess.shape)}."
+            )
+        return (guess[:, -1, :] - x1_flat).norm(dim=-1).detach()
 
     def _endpoint_errors(self, mean: Tensor, std: Tensor, x0: Tensor, x1: Tensor) -> Tensor:
         if mean.numel() == 0:

@@ -194,14 +194,29 @@ class RectificationConfig:
 class NodeSolverConfig:
     method: str = "euler"
     node_steps: int = 100
+    correct_terminal_guess: bool = True
+    time_end: float = 1.0
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "NodeSolverConfig":
-        cfg = _strict_dataclass(cls, data, "node_solver")
+        values = dict(_require_mapping(data, "node_solver"))
+        # Existing resolved runs may contain the formerly inactive setting.
+        # Only a zero value can retain deterministic behavior.
+        if "xi" in values:
+            legacy_xi = values.pop("xi")
+            if isinstance(legacy_xi, bool) or not isinstance(legacy_xi, (int, float)) or legacy_xi != 0:
+                raise ValueError("node_solver.xi is no longer supported; only legacy xi: 0 is accepted.")
+        values.setdefault("correct_terminal_guess", True)
+        values.setdefault("time_end", 1.0)
+        cfg = _strict_dataclass(cls, values, "node_solver")
         if cfg.method not in {"euler", "rk4"}:
             raise ValueError("node_solver.method must be 'euler' or 'rk4'.")
         if cfg.node_steps <= 0:
             raise ValueError("node_solver.node_steps must be positive.")
+        if not isinstance(cfg.correct_terminal_guess, bool):
+            raise ValueError("node_solver.correct_terminal_guess must be a boolean.")
+        if not 0.0 < cfg.time_end <= 1.0:
+            raise ValueError("node_solver.time_end must be in (0, 1].")
         return cfg
 
 
@@ -220,6 +235,9 @@ class BridgeSolverConfig:
     n_density_samples: int = 1
     n_reference_grid: Optional[int] = None
     entropy_density_std_floor: Optional[float] = None
+    entropy_reference_max_iterations: int = 1
+    entropy_reference_tolerance: float = 1e-3
+    entropy_reference_relaxation: float = 0.5
     num_workers: int = 1
     failure_policy: str = "skip_pair"
 
@@ -242,13 +260,23 @@ class BridgeSolverConfig:
             sigma_target = float(self.sigma_target)
             if self.sigma is not None:
                 object.__setattr__(self, "sigma", float(self.sigma))
-        if sigma_source <= 0.0 or sigma_target <= 0.0:
-            raise ValueError("bridge_solver sigma endpoints must be positive.")
+        if sigma_source <= 0.0:
+            raise ValueError("bridge_solver.sigma_source must be positive.")
+        if sigma_target < 0.0:
+            raise ValueError("bridge_solver.sigma_target must be nonnegative.")
         if self.entropy_density_std_floor is not None:
             entropy_density_std_floor = float(self.entropy_density_std_floor)
             if entropy_density_std_floor <= 0.0:
                 raise ValueError("bridge_solver.entropy_density_std_floor must be positive when provided.")
             object.__setattr__(self, "entropy_density_std_floor", entropy_density_std_floor)
+        if self.entropy_reference_max_iterations <= 0:
+            raise ValueError("bridge_solver.entropy_reference_max_iterations must be positive.")
+        if self.entropy_reference_tolerance <= 0.0:
+            raise ValueError("bridge_solver.entropy_reference_tolerance must be positive.")
+        if not 0.0 < self.entropy_reference_relaxation <= 1.0:
+            raise ValueError(
+                "bridge_solver.entropy_reference_relaxation must be in (0, 1]."
+            )
         object.__setattr__(self, "sigma_source", sigma_source)
         object.__setattr__(self, "sigma_target", sigma_target)
 
@@ -264,6 +292,9 @@ class BridgeSolverConfig:
         data.setdefault("n_density_samples", 1)
         data.setdefault("n_reference_grid", None)
         data.setdefault("entropy_density_std_floor", None)
+        data.setdefault("entropy_reference_max_iterations", 1)
+        data.setdefault("entropy_reference_tolerance", 1e-3)
+        data.setdefault("entropy_reference_relaxation", 0.5)
         data.setdefault("num_workers", 1)
         cfg = _strict_dataclass(cls, data, "bridge_solver")
         if cfg.kind != "scipy":
@@ -408,6 +439,10 @@ class TrainConfig:
         )
         if cfg.bridge_solver.bridge_steps > cfg.node_solver.node_steps:
             raise ValueError("bridge_solver.bridge_steps must be <= node_solver.node_steps.")
+        if cfg.bridge_solver.sigma_target == 0.0:
+            raise ValueError(
+                "bridge_solver.sigma_target: 0 is supported only by trainer_v2."
+            )
         return cfg
 
 

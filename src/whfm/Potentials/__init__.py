@@ -9,7 +9,14 @@ from .interaction_potentials import (
     RepulsiveKernel,
     build_interaction_potential,
 )
-from .internal_potentials import EntropyPotential, InternalPotential, build_internal_potential
+from .internal_potentials import (
+    EntropyCostPotential,
+    EntropyPotential,
+    InternalPotential,
+    build_internal_potential,
+    entropy_cost,
+    gaussian_mixture_log_density,
+)
 from .linear_potentials import (
     CrowdNavObstaclePotential,
     DoubleWellPotential,
@@ -56,6 +63,9 @@ __all__ = [
     "GridSpringPotential",
     "CrowdNavObstaclePotential",
     "EntropyPotential",
+    "EntropyCostPotential",
+    "entropy_cost",
+    "gaussian_mixture_log_density",
     "KernelInteractionPotential",
     "RationalQuadraticInteractionKernel",
     "RepulsiveKernel",

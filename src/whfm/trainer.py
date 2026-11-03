@@ -31,7 +31,7 @@ from .evaluation import (
     postprocess_rectification_results,
     save_bridge_solution_plots,
 )
-from .losses import flow_matching_loss
+from .losses import flow_matching_loss, gaussian_sample_and_target
 from .node import NodeSolver, call_velocity_model
 
 
@@ -88,6 +88,7 @@ class HamiltonianTrainer:
         self.node_solver = NodeSolver(
             train_config.node_solver.method,
             node_steps=train_config.node_solver.node_steps,
+            time_end=train_config.node_solver.time_end,
         )
         self.initial_coupler = Coupler(train_config.initial_fit.coupling)
         self.rectification_coupler = Coupler("ot")
@@ -104,6 +105,9 @@ class HamiltonianTrainer:
             n_density_samples=train_config.bridge_solver.n_density_samples,
             n_reference_grid=train_config.bridge_solver.n_reference_grid,
             entropy_density_std_floor=train_config.bridge_solver.entropy_density_std_floor,
+            entropy_reference_max_iterations=train_config.bridge_solver.entropy_reference_max_iterations,
+            entropy_reference_tolerance=train_config.bridge_solver.entropy_reference_tolerance,
+            entropy_reference_relaxation=train_config.bridge_solver.entropy_reference_relaxation,
             num_workers=train_config.bridge_solver.num_workers,
             failure_policy=train_config.bridge_solver.failure_policy,
         )
@@ -252,9 +256,14 @@ class HamiltonianTrainer:
     ) -> BridgeSolution:
         trajectory = self.node_solver.integrate(generation_model, x_source)
         generated_target = trajectory.states[-1].detach()
+        terminal_reference = (
+            y_target
+            if self.train_config.node_solver.correct_terminal_guess
+            else generated_target
+        )
         coupled = self.rectification_coupler.pair_with_labels(
             generated_target,
-            y_target,
+            terminal_reference,
             y0=trajectory.states.permute(1, 0, 2).contiguous(),
         )
         aligned_traj = coupled.y0.permute(1, 0, 2).contiguous()
@@ -270,13 +279,20 @@ class HamiltonianTrainer:
             aligned_target,
             reverse=False,
             bridge_steps=self.train_config.bridge_solver.bridge_steps,
+            correct_terminal_guess=self.train_config.node_solver.correct_terminal_guess,
+            time_grid=trajectory.time_grid,
         )
-        return self.bridge_solver.solve_batch(
+        solution = self.bridge_solver.solve_batch(
             aligned_source,
             aligned_target,
             mean_guess=mean_guess,
             mean_velocity_guess=velocity_guess,
         )
+        solution.terminal_location_correction_errors = (
+            coupled.x1.detach().reshape(coupled.x1.shape[0], -1)
+            - coupled.x0.detach().reshape(coupled.x0.shape[0], -1)
+        ).norm(dim=-1)
+        return solution
 
     @torch.no_grad()
     def _generate_forward_bridge(
@@ -287,9 +303,14 @@ class HamiltonianTrainer:
     ) -> BridgeSolution:
         trajectory = self.node_solver.integrate(generation_model, y_target)
         generated_source = trajectory.states[-1].detach()
+        terminal_reference = (
+            x_source
+            if self.train_config.node_solver.correct_terminal_guess
+            else generated_source
+        )
         coupled = self.rectification_coupler.pair_with_labels(
             generated_source,
-            x_source,
+            terminal_reference,
             y0=trajectory.states.permute(1, 0, 2).contiguous(),
         )
         aligned_traj = coupled.y0.permute(1, 0, 2).contiguous()
@@ -305,13 +326,20 @@ class HamiltonianTrainer:
             aligned_target,
             reverse=True,
             bridge_steps=self.train_config.bridge_solver.bridge_steps,
+            correct_terminal_guess=self.train_config.node_solver.correct_terminal_guess,
+            time_grid=trajectory.time_grid,
         )
-        return self.bridge_solver.solve_batch(
+        solution = self.bridge_solver.solve_batch(
             aligned_source,
             aligned_target,
             mean_guess=mean_guess,
             mean_velocity_guess=velocity_guess,
         )
+        solution.terminal_location_correction_errors = (
+            coupled.x1.detach().reshape(coupled.x1.shape[0], -1)
+            - coupled.x0.detach().reshape(coupled.x0.shape[0], -1)
+        ).norm(dim=-1)
+        return solution
 
     @torch.no_grad()
     def _generate_backward_bridge(
@@ -322,9 +350,14 @@ class HamiltonianTrainer:
     ) -> BridgeSolution:
         trajectory = self.node_solver.integrate(generation_model, x_source)
         generated_target = trajectory.states[-1].detach()
+        terminal_reference = (
+            y_target
+            if self.train_config.node_solver.correct_terminal_guess
+            else generated_target
+        )
         coupled = self.rectification_coupler.pair_with_labels(
             generated_target,
-            y_target,
+            terminal_reference,
             y0=trajectory.states.permute(1, 0, 2).contiguous(),
         )
         aligned_traj = coupled.y0.permute(1, 0, 2).contiguous()
@@ -340,13 +373,24 @@ class HamiltonianTrainer:
             aligned_source,
             reverse=True,
             bridge_steps=self.train_config.bridge_solver.bridge_steps,
+            correct_terminal_guess=self.train_config.node_solver.correct_terminal_guess,
+            time_grid=trajectory.time_grid,
         )
-        return self.bridge_solver.solve_batch(
+        solution = self.bridge_solver.solve_batch(
             aligned_target,
             aligned_source,
             mean_guess=mean_guess,
             mean_velocity_guess=velocity_guess,
         )
+        solution.terminal_location_correction_errors = (
+            coupled.x1.detach().reshape(coupled.x1.shape[0], -1)
+            - coupled.x0.detach().reshape(coupled.x0.shape[0], -1)
+        ).norm(dim=-1)
+        return solution
+
+    def _sample_training_times(self, batch_size: int, *, device, dtype) -> Tensor:
+        time_end = getattr(self.train_config.node_solver, "time_end", 1.0)
+        return time_end * torch.rand((batch_size, 1), device=device, dtype=dtype)
 
     def _train_straight_batch(
         self,
@@ -359,7 +403,9 @@ class HamiltonianTrainer:
         state.model.train()
         for _ in range(steps):
             state.optimizer.zero_grad(set_to_none=True)
-            t = torch.rand((x0.shape[0], 1), device=x0.device, dtype=x0.dtype)
+            t = self._sample_training_times(
+                x0.shape[0], device=x0.device, dtype=x0.dtype
+            )
             xt = (1.0 - t) * x0 + t * x1
             if self.train_config.initial_fit.noise_std > 0.0:
                 xt = xt + self.train_config.initial_fit.noise_std * torch.randn_like(xt)
@@ -386,10 +432,15 @@ class HamiltonianTrainer:
             idx = torch.randint(solution.x0.shape[0], (batch_size,), device=self.device)
             x0 = solution.x0[idx]
             x1 = solution.x1[idx]
-            t = torch.rand((x0.shape[0], 1), device=self.device, dtype=self.dtype)
-            epsilon = torch.randn_like(x0)
-            xt = solution.path.sample_xt(x0, x1, t, epsilon)
-            target = solution.path.compute_ut(x0, x1, t, xt)
+            t = self._sample_training_times(
+                x0.shape[0], device=self.device, dtype=self.dtype
+            )
+            mean, mean_velocity, std, std_velocity = solution.path.compute(
+                x0, x1, t, return_derivatives=True
+            )
+            xt, target = gaussian_sample_and_target(
+                mean, mean_velocity, std, std_velocity, torch.randn_like(x0),
+            )
             prediction = call_velocity_model(state.model, xt, t)
             loss = flow_matching_loss(prediction, target)
             self._check_finite(loss, "bridge loss")
@@ -812,6 +863,28 @@ class HamiltonianTrainer:
             if solver_mesh_nodes
             else float("nan")
         )
+        guess_terminal_errors = solution.initial_guess_terminal_errors
+        mean_initial_guess_terminal_error = (
+            float(guess_terminal_errors.mean().detach().cpu())
+            if guess_terminal_errors is not None and guess_terminal_errors.numel()
+            else float("nan")
+        )
+        max_initial_guess_terminal_error = (
+            float(guess_terminal_errors.max().detach().cpu())
+            if guess_terminal_errors is not None and guess_terminal_errors.numel()
+            else float("nan")
+        )
+        terminal_correction_errors = solution.terminal_location_correction_errors
+        mean_terminal_location_correction = (
+            float(terminal_correction_errors.mean().detach().cpu())
+            if terminal_correction_errors is not None and terminal_correction_errors.numel()
+            else float("nan")
+        )
+        max_terminal_location_correction = (
+            float(terminal_correction_errors.max().detach().cpu())
+            if terminal_correction_errors is not None and terminal_correction_errors.numel()
+            else float("nan")
+        )
         diagnostic_paths = self._save_bridge_diagnostics(
             direction, rectification_index, batch_index, solution
         )
@@ -830,6 +903,16 @@ class HamiltonianTrainer:
                 "mean_solver_iterations": mean_solver_iterations,
                 "max_solver_iterations": max_solver_iterations,
                 "mean_solver_mesh_nodes": mean_solver_mesh_nodes,
+                "mean_initial_guess_terminal_error": mean_initial_guess_terminal_error,
+                "max_initial_guess_terminal_error": max_initial_guess_terminal_error,
+                "mean_terminal_location_correction": mean_terminal_location_correction,
+                "max_terminal_location_correction": max_terminal_location_correction,
+                "entropy_reference_iterations": solution.entropy_reference_iterations,
+                "entropy_reference_converged": solution.entropy_reference_converged,
+                "entropy_reference_final_delta": solution.entropy_reference_final_delta,
+                "entropy_reference_delta_history": list(solution.entropy_reference_delta_history),
+                "entropy_reference_component_fallbacks": solution.entropy_reference_component_fallbacks,
+                "entropy_reference_component_indices": list(solution.entropy_reference_component_indices),
                 "guess_source": solution.guess_source,
                 "failure_preview": list(solution.failure_messages.items())[:5],
                 "diagnostics": diagnostic_paths,
