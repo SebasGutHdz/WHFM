@@ -13,6 +13,20 @@ def flow_matching_loss(vt: Tensor, ut: Tensor) -> Tensor:
     return F.mse_loss(vt, ut)
 
 
+def gaussian_sample_and_target(
+    mean: Tensor,
+    mean_velocity: Tensor,
+    std: Tensor,
+    std_velocity: Tensor,
+    noise: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """Sample a positive-scale Gaussian bridge and its conditional velocity."""
+
+    if torch.any(std <= 0):
+        raise ValueError("std must be strictly positive.")
+    return mean + std * noise, mean_velocity + std_velocity * noise
+
+
 def _call_model(model, xt: Tensor, t: Tensor) -> Tensor:
     t_col = t.reshape(t.shape[0], -1)[:, :1] if t.dim() > 1 else t.reshape(-1, 1)
     if xt.dim() == 2:

@@ -12,6 +12,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
+
 from ..Potentials import ConfiguredPotential
 from ..bridge import GaussianBridgeSolver
 from ..config import load_problem_config, load_train_config
@@ -20,6 +21,7 @@ from .checkpoint import load_checkpoint
 from .animate import (
     _build_model,
     _json_ready,
+    _load_run_train_config,
     _model_state_dict,
     _prepare_evaluation_split,
     _resolve_device,
@@ -56,6 +58,7 @@ def create_gaussian_bridge_visualizations(
     direction: str = "all",
     model_kind: str = "all",
     sample_index: int = 0,
+    num_bridges: int = 10,
     device: str | None = None,
     output_dir: str | Path | None = None,
     node_steps: int | None = None,
@@ -68,10 +71,14 @@ def create_gaussian_bridge_visualizations(
     std_visual_scale: float = 1.0,
     potential_background: bool = True,
 ) -> list[dict]:
-    """Create static and animated plots for one rollout-induced Gaussian BVP."""
+    """Create static and animated plots for rollout-induced Gaussian BVPs."""
 
     run_dir = Path(run_dir)
-    train_config = load_train_config(run_dir / "resolved_train.yaml")
+    train_config = (
+        _load_run_train_config(run_dir)
+        if (run_dir / "resolved_train_v2.yaml").exists()
+        else load_train_config(run_dir / "resolved_train.yaml")
+    )
     problem_config = load_problem_config(run_dir / "resolved_problem.yaml")
     dtype = _resolve_dtype(train_config.dtype)
     resolved_device = _resolve_device(device or train_config.device)
@@ -81,10 +88,15 @@ def create_gaussian_bridge_visualizations(
     specs = available_model_specs(checkpoint_state, direction=direction, model_kind=model_kind)
 
     potential = ConfiguredPotential(problem_config.functional.to_potential_cfg())
-    node_solver = NodeSolver(
-        train_config.node_solver.method,
-        node_steps=train_config.node_solver.node_steps if node_steps is None else int(node_steps),
-    )
+    node_solver_kwargs = {
+        "node_steps": (
+            train_config.node_solver.node_steps if node_steps is None else int(node_steps)
+        ),
+    }
+    time_end = getattr(train_config.node_solver, "time_end", 1.0)
+    if time_end != 1.0:
+        node_solver_kwargs["time_end"] = time_end
+    node_solver = NodeSolver(train_config.node_solver.method, **node_solver_kwargs)
     bridge_solver = _build_bridge_solver(train_config, potential)
     source_test, target_test = _prepare_evaluation_split(
         train_config,
@@ -96,6 +108,9 @@ def create_gaussian_bridge_visualizations(
     sample_index = int(sample_index)
     if sample_index < 0:
         raise ValueError("sample_index must be non-negative.")
+    num_bridges = int(num_bridges)
+    if num_bridges <= 0:
+        raise ValueError("num_bridges must be positive.")
     if num_frames <= 0:
         raise ValueError("num_frames must be positive.")
     density_level_values = _parse_density_levels(density_levels)
@@ -124,13 +139,12 @@ def create_gaussian_bridge_visualizations(
             pool = target_test
         else:
             raise ValueError(f"unsupported direction in checkpoint: {direction_name!r}")
-        if sample_index >= pool.shape[0]:
-            raise ValueError(
-                f"sample_index {sample_index} is out of range for {direction_name} "
-                f"evaluation split with {pool.shape[0]} samples."
-            )
-
-        x0 = pool[sample_index : sample_index + 1]
+        x0 = _select_bridge_initial_samples(
+            pool,
+            sample_index=sample_index,
+            num_bridges=num_bridges,
+            direction_name=direction_name,
+        )
         with torch.no_grad():
             node_trajectory = node_solver.integrate(model, x0)
         x1 = node_trajectory.states[-1]
@@ -141,6 +155,10 @@ def create_gaussian_bridge_visualizations(
             x1,
             reverse=False,
             bridge_steps=train_config.bridge_solver.bridge_steps,
+            correct_terminal_guess=getattr(
+                train_config.node_solver, "correct_terminal_guess", True
+            ),
+            time_grid=node_trajectory.time_grid,
         )
         solution = bridge_solver.solve_batch(
             x0,
@@ -154,7 +172,11 @@ def create_gaussian_bridge_visualizations(
                 f"{direction_name}/{kind} in checkpoint {checkpoint_path}."
             )
 
-        tag = f"{direction_name}_{kind}_{checkpoint_path.stem}_sample{sample_index}_gaussian_bridge"
+        last_sample_index = sample_index + num_bridges - 1
+        tag = (
+            f"{direction_name}_{kind}_{checkpoint_path.stem}_"
+            f"samples{sample_index}-{last_sample_index}_count{num_bridges}_gaussian_bridge"
+        )
         static_path = figures_dir / f"{tag}.png"
         gif_path = figures_dir / f"{tag}.gif"
         _save_gaussian_bridge_static_plot(
@@ -191,6 +213,11 @@ def create_gaussian_bridge_visualizations(
                     "direction": direction_name,
                     "model_kind": kind,
                     "sample_index": sample_index,
+                    "num_bridges_requested": num_bridges,
+                    "num_bridges_successful": solution.num_successful,
+                    "num_bridges_failed": solution.num_pairs - solution.num_successful,
+                    "success_indices": solution.success_indices,
+                    "failed_indices": solution.failed_indices,
                     "static_path": str(static_path),
                     "gif_path": str(gif_path),
                     "num_bridge_steps": int(solution.time_grid.numel() - 1),
@@ -199,7 +226,7 @@ def create_gaussian_bridge_visualizations(
                     "density_levels": density_level_values,
                     "visual_seed": visual_seed,
                     "std_visual_scale": std_visual_scale,
-                    "endpoint_errors": solution.endpoint_errors[0],
+                    "endpoint_errors": solution.endpoint_errors,
                     "solve_time_seconds": float(solution.solve_time_seconds),
                 }
             )
@@ -234,6 +261,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Model kind to plot. Defaults to online plus EMA when present.",
     )
     parser.add_argument("--sample-index", type=int, default=0, help="Held-out initial sample index.")
+    parser.add_argument(
+        "--num-bridges",
+        type=int,
+        default=10,
+        help="Number of consecutive held-out Gaussian bridges to plot.",
+    )
     parser.add_argument("--device", default=None, help="Evaluation device override, e.g. cpu or cuda:0.")
     parser.add_argument("--output-dir", default=None, help="Directory for plots. Defaults under the run directory.")
     parser.add_argument(
@@ -290,6 +323,7 @@ def main(argv=None):
         direction=args.direction,
         model_kind=args.model_kind,
         sample_index=args.sample_index,
+        num_bridges=args.num_bridges,
         device=args.device,
         output_dir=args.output_dir,
         node_steps=args.node_steps,
@@ -330,6 +364,28 @@ def _resolve_output_dir(run_dir: Path, output_dir: str | Path | None) -> Path:
     return Path(output_dir)
 
 
+def _select_bridge_initial_samples(
+    pool: Tensor,
+    *,
+    sample_index: int,
+    num_bridges: int,
+    direction_name: str,
+) -> Tensor:
+    """Select an exact consecutive batch for bridge visualization."""
+
+    if sample_index < 0:
+        raise ValueError("sample_index must be non-negative.")
+    if num_bridges <= 0:
+        raise ValueError("num_bridges must be positive.")
+    stop = sample_index + num_bridges
+    if stop > pool.shape[0]:
+        raise ValueError(
+            f"samples [{sample_index}, {stop}) are out of range for {direction_name} "
+            f"evaluation split with {pool.shape[0]} samples."
+        )
+    return pool[sample_index:stop]
+
+
 def _snapshot_indices(num_time_points: int, num_frames: int) -> list[int]:
     if num_time_points <= 0:
         raise ValueError("num_time_points must be positive.")
@@ -367,18 +423,30 @@ def _sample_gaussian_clouds(
     num_cloud_samples = int(num_cloud_samples)
     if num_cloud_samples <= 0:
         raise ValueError("num_cloud_samples must be positive.")
-    centers = np.asarray(mean_plot, dtype=np.float64).reshape(mean_plot.shape[0], -1, 2)
-    std_values = np.asarray(std, dtype=np.float64).reshape(-1)
-    if centers.shape[0] != std_values.shape[0]:
-        raise ValueError("mean_plot and std must have matching time dimensions.")
+    mean_values = np.asarray(mean_plot, dtype=np.float64)
+    std_values = np.asarray(std, dtype=np.float64)
+    if std_values.ndim == 1:
+        if mean_values.shape[0] != std_values.shape[0]:
+            raise ValueError("mean_plot and std must have matching time dimensions.")
+        centers = mean_values.reshape(1, mean_values.shape[0], -1, 2)
+        std_values = std_values.reshape(1, -1)
+    elif std_values.ndim == 2:
+        if mean_values.shape[:2] != std_values.shape:
+            raise ValueError("mean_plot and std must have matching bridge and time dimensions.")
+        centers = mean_values.reshape(mean_values.shape[0], mean_values.shape[1], -1, 2)
+    else:
+        raise ValueError("std must have shape (time,) or (bridges, time).")
     std_visual_scale = float(std_visual_scale)
     if not np.isfinite(std_visual_scale) or std_visual_scale <= 0.0:
         raise ValueError("std_visual_scale must be positive and finite.")
     std_values = std_values * std_visual_scale
     rng = np.random.default_rng(int(seed))
-    noise = rng.standard_normal((centers.shape[0], centers.shape[1], num_cloud_samples, 2))
-    samples = centers[:, :, None, :] + std_values[:, None, None, None] * noise
-    return samples.reshape(centers.shape[0], centers.shape[1] * num_cloud_samples, 2)
+    noise = rng.standard_normal(
+        (centers.shape[0], centers.shape[1], centers.shape[2], num_cloud_samples, 2)
+    )
+    samples = centers[:, :, :, None, :] + std_values[:, :, None, None, None] * noise
+    samples = samples.transpose(1, 0, 2, 3, 4)
+    return samples.reshape(samples.shape[0], -1, 2)
 
 
 def _save_gaussian_bridge_static_plot(
@@ -403,7 +471,7 @@ def _save_gaussian_bridge_static_plot(
         raise RuntimeError(f"Gaussian bridge plotting dependencies are unavailable: {exc}") from exc
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    bridge = _first_bridge_arrays(solution, potential, evaluation_config, std_visual_scale=std_visual_scale)
+    bridge = _bridge_arrays(solution, potential, evaluation_config, std_visual_scale=std_visual_scale)
     indices = _snapshot_indices(bridge.time_grid.shape[0], num_frames)
     cmap = plt.get_cmap(TIME_COLORMAP)
     norm = plt.Normalize(vmin=float(bridge.time_grid[0]), vmax=float(bridge.time_grid[-1]))
@@ -419,34 +487,41 @@ def _save_gaussian_bridge_static_plot(
     sorted_levels = sorted(density_levels, reverse=True)
     for plot_count, index in enumerate(indices):
         color = cmap(norm(float(bridge.time_grid[index])))
-        centers = _flatten_positions(bridge.mean_plot[index])
+        centers = _flatten_positions(bridge.mean_plot[:, index])
         density_label = "Gaussian confidence regions" if plot_count == 0 else None
-        for center in centers:
-            for rank, level in enumerate(sorted_levels):
-                alpha = 0.05 + 0.08 * (len(sorted_levels) - rank - 1)
-                ax.add_patch(
-                    Circle(
-                        (float(center[0]), float(center[1])),
-                        float(level * bridge.std[index] * std_visual_scale),
-                        edgecolor=color,
-                        facecolor=color,
-                        alpha=alpha,
-                        linewidth=0.8,
-                        label=density_label,
-                        zorder=2 + 0.1 * rank,
+        for bridge_index in range(bridge.mean_plot.shape[0]):
+            bridge_centers = _flatten_positions(bridge.mean_plot[bridge_index, index])
+            for center in bridge_centers:
+                for rank, level in enumerate(sorted_levels):
+                    level_fraction = (
+                        0.0
+                        if len(sorted_levels) == 1
+                        else (len(sorted_levels) - rank - 1) / (len(sorted_levels) - 1)
                     )
-                )
-                density_label = None
+                    alpha = 0.18 + 0.24 * level_fraction
+                    ax.add_patch(
+                        Circle(
+                            (float(center[0]), float(center[1])),
+                            float(level * bridge.std[bridge_index, index] * std_visual_scale),
+                            edgecolor=color,
+                            facecolor=color,
+                            alpha=alpha,
+                            linewidth=1.0,
+                            label=density_label,
+                            zorder=2 + 0.1 * rank,
+                        )
+                    )
+                    density_label = None
         ax.scatter(
             centers[:, 0],
             centers[:, 1],
-            s=PUBLICATION_TERMINAL_MARKER_SIZE,
+            s=PUBLICATION_TERMINAL_MARKER_SIZE * 1.3,
             color=color,
             edgecolors="black",
-            linewidths=0.1,
-            alpha=0.1,
+            linewidths=0.45,
+            alpha=0.75,
             label="mean snapshots" if plot_count == 0 else None,
-            zorder=1,
+            zorder=4,
         )
 
     _draw_endpoints(ax, bridge)
@@ -489,7 +564,7 @@ def _save_gaussian_bridge_gif(
         raise RuntimeError(f"Gaussian bridge GIF dependencies are unavailable: {exc}") from exc
 
     gif_path.parent.mkdir(parents=True, exist_ok=True)
-    bridge = _first_bridge_arrays(solution, potential, evaluation_config, std_visual_scale=std_visual_scale)
+    bridge = _bridge_arrays(solution, potential, evaluation_config, std_visual_scale=std_visual_scale)
     cmap = plt.get_cmap(TIME_COLORMAP)
     norm = plt.Normalize(vmin=float(bridge.time_grid[0]), vmax=float(bridge.time_grid[-1]))
 
@@ -510,14 +585,14 @@ def _save_gaussian_bridge_gif(
         seed=visual_seed,
         std_visual_scale=std_visual_scale,
     )
-    initial_centers = _flatten_positions(bridge.mean_plot[0])
+    initial_centers = _flatten_positions(bridge.mean_plot[:, 0])
     initial_color = cmap(norm(float(bridge.time_grid[0])))
     cloud = ax.scatter(
         clouds[0, :, 0],
         clouds[0, :, 1],
         s=12,
         color=initial_color,
-        alpha=0.48,
+        alpha=0.65,
         linewidths=0,
         label="Gaussian samples",
         zorder=3,
@@ -525,10 +600,10 @@ def _save_gaussian_bridge_gif(
     current = ax.scatter(
         initial_centers[:, 0],
         initial_centers[:, 1],
-        s=PUBLICATION_GIF_STATIC_MARKER_SIZE * 1.1,
+        s=PUBLICATION_GIF_STATIC_MARKER_SIZE * 1.5,
         color=initial_color,
         edgecolors="black",
-        linewidths=0.5,
+        linewidths=0.8,
         label="current mean",
         zorder=5,
     )
@@ -538,7 +613,7 @@ def _save_gaussian_bridge_gif(
     _style_legend(ax, markerscale=1.2)
 
     def update(frame: int):
-        centers = _flatten_positions(bridge.mean_plot[frame])
+        centers = _flatten_positions(bridge.mean_plot[:, frame])
         color = cmap(norm(float(bridge.time_grid[frame])))
         cloud.set_offsets(clouds[frame])
         cloud.set_color([color])
@@ -547,7 +622,7 @@ def _save_gaussian_bridge_gif(
         text.set_text(f"t={float(bridge.time_grid[frame]):.3f}")
         return [cloud, current, text]
 
-    animation = FuncAnimation(fig, update, frames=bridge.mean_plot.shape[0], interval=1000.0 / fps, blit=False)
+    animation = FuncAnimation(fig, update, frames=bridge.mean_plot.shape[1], interval=1000.0 / fps, blit=False)
     try:
         animation.save(gif_path, writer=PillowWriter(fps=fps), dpi=dpi)
     except Exception as exc:  # pragma: no cover - depends on optional writer install
@@ -557,15 +632,15 @@ def _save_gaussian_bridge_gif(
     return gif_path
 
 
-def _first_bridge_arrays(solution, potential, evaluation_config, *, std_visual_scale: float = 1.0):
+def _bridge_arrays(solution, potential, evaluation_config, *, std_visual_scale: float = 1.0):
     if solution.num_successful <= 0:
         raise ValueError("Gaussian bridge solution contains no successful pairs.")
-    mean = solution.mean[:1]
-    std = solution.std[0, :, 0].detach().cpu().numpy()
-    x0 = solution.x0[:1]
-    x1 = solution.x1[:1]
+    mean = solution.mean
+    std = solution.std[..., 0].detach().cpu().numpy()
+    x0 = solution.x0
+    x1 = solution.x1
     descriptor = _particle_plot_descriptor(potential, mean.shape[-1])
-    mean_plot = _plot_positions(mean[0], evaluation_config, descriptor).detach().cpu().numpy()
+    mean_plot = _plot_positions(mean, evaluation_config, descriptor).detach().cpu().numpy()
     x0_plot = _plot_positions(x0, evaluation_config, descriptor).detach().cpu().numpy()
     x1_plot = _plot_positions(x1, evaluation_config, descriptor).detach().cpu().numpy()
     time_grid = solution.time_grid.detach().cpu().numpy()
@@ -578,7 +653,7 @@ def _first_bridge_arrays(solution, potential, evaluation_config, *, std_visual_s
     std_visual_scale = float(std_visual_scale)
     if not np.isfinite(std_visual_scale) or std_visual_scale <= 0.0:
         raise ValueError("std_visual_scale must be positive and finite.")
-    radius = 3.0 * std_visual_scale * solution.std[0, :, 0].detach().max()
+    radius = 3.0 * std_visual_scale * solution.std[..., 0].detach().max()
     low = low - radius
     high = high + radius
     low, high = _resolve_plot_domain(evaluation_config, low, high)
@@ -605,13 +680,18 @@ def _draw_bridge_background(
     evaluation_config,
     potential_background: bool,
 ) -> None:
+    ax.set_facecolor("white")
     if potential_background:
         _plot_linear_contour(
             ax,
             potential,
-            bridge.x0,
+            bridge.x0[:1],
             evaluation_config,
             domain_tensors=(bridge.mean, bridge.x0, bridge.x1),
+            fill_alpha=0.25,
+            line_color="0.15",
+            line_width=0.9,
+            line_alpha=0.9,
         )
     ax.set_xlim(float(bridge.low[0]), float(bridge.high[0]))
     ax.set_ylim(float(bridge.low[1]), float(bridge.high[1]))

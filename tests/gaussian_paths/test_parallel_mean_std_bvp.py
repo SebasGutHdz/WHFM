@@ -113,6 +113,18 @@ def test_mean_std_bvp_partial_failure_preserves_original_indices(monkeypatch):
     assert path.solve_metadata["pair_solver_mesh_nodes"] == [4, None, 6]
 
 
+def test_bridge_solver_computes_initializer_terminal_error():
+    bridge = importlib.import_module("whfm.bridge")
+    mean_guess = torch.tensor([[[0.0], [3.0]], [[1.0], [5.0]]])
+    target = torch.tensor([[4.0], [2.0]])
+
+    errors = bridge.GaussianBridgeSolver._initial_guess_terminal_errors(
+        mean_guess, target
+    )
+
+    torch.testing.assert_close(errors, torch.tensor([1.0, 3.0]))
+
+
 def test_bridge_solver_skip_pair_returns_empty_solution_when_all_pairs_fail(monkeypatch):
     gaussian_paths, bridge = _load_modules(monkeypatch)
 

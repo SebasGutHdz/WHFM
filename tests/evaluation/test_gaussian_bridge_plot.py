@@ -13,27 +13,30 @@ def _load_gaussian_bridge_plot(monkeypatch):
     return importlib.import_module("whfm.evaluation.gaussian_bridge_plot")
 
 
-def _synthetic_solution():
-    mean = torch.tensor(
-        [
-            [
-                [0.0, 0.0],
-                [0.4, 0.15],
-                [0.8, 0.35],
-                [1.0, 0.6],
-            ]
-        ],
+def _synthetic_solution(num_successful=1, *, num_pairs=None):
+    base_mean = torch.tensor(
+        [[0.0, 0.0], [0.4, 0.15], [0.8, 0.35], [1.0, 0.6]],
         dtype=torch.float32,
     )
-    std = torch.tensor([[[0.1], [0.2], [0.15], [0.08]]], dtype=torch.float32)
+    offsets = torch.arange(num_successful, dtype=torch.float32).reshape(-1, 1, 1)
+    mean = base_mean.unsqueeze(0) + offsets
+    std = torch.tensor([0.1, 0.2, 0.15, 0.08], dtype=torch.float32)
+    std = std.reshape(1, -1, 1).repeat(num_successful, 1, 1)
+    num_pairs = num_successful if num_pairs is None else int(num_pairs)
+    success_indices = torch.arange(num_successful)
+    failed_indices = torch.arange(num_successful, num_pairs)
     return SimpleNamespace(
-        num_successful=1,
+        num_successful=num_successful,
+        num_pairs=num_pairs,
         mean=mean,
         std=std,
         x0=mean[:, 0],
         x1=mean[:, -1],
         time_grid=torch.linspace(0.0, 1.0, mean.shape[1]),
-        endpoint_errors=torch.zeros(1, 4),
+        success_indices=success_indices,
+        failed_indices=failed_indices,
+        success_mask=torch.arange(num_pairs) < num_successful,
+        endpoint_errors=torch.zeros(num_successful, 4),
         solve_time_seconds=0.0,
     )
 
@@ -47,6 +50,7 @@ def test_parser_defaults_and_num_frames(monkeypatch):
     assert args.direction == "all"
     assert args.model_kind == "all"
     assert args.sample_index == 0
+    assert args.num_bridges == 10
     assert args.node_steps is None
     assert args.num_frames == 8
     assert args.num_cloud_samples == 300
@@ -59,6 +63,8 @@ def test_parser_defaults_and_num_frames(monkeypatch):
         "results/stunnel/run",
         "--num-frames",
         "10",
+        "--num-bridges",
+        "3",
         "--num-cloud-samples",
         "25",
         "--density-levels",
@@ -69,6 +75,7 @@ def test_parser_defaults_and_num_frames(monkeypatch):
         "50",
     ])
     assert args.num_frames == 10
+    assert args.num_bridges == 3
     assert args.num_cloud_samples == 25
     assert args.density_levels == "0.5,1,2"
     assert args.visual_seed == 999
@@ -134,6 +141,102 @@ def test_gaussian_cloud_sampling_handles_particle_shapes(monkeypatch):
     assert clouds.shape == (3, 8, 2)
 
 
+def test_gaussian_cloud_sampling_handles_multiple_bridges(monkeypatch):
+    bridge_plot = _load_gaussian_bridge_plot(monkeypatch)
+    mean_plot = np.zeros((2, 3, 2, 2), dtype=float)
+    std = np.ones((2, 3), dtype=float) * 0.1
+
+    clouds = bridge_plot._sample_gaussian_clouds(
+        mean_plot,
+        std,
+        num_cloud_samples=4,
+        seed=123,
+    )
+
+    assert clouds.shape == (3, 16, 2)
+
+
+def test_select_bridge_initial_samples_requires_exact_consecutive_batch(monkeypatch):
+    bridge_plot = _load_gaussian_bridge_plot(monkeypatch)
+    pool = torch.arange(24).reshape(12, 2)
+
+    selected = bridge_plot._select_bridge_initial_samples(
+        pool,
+        sample_index=1,
+        num_bridges=10,
+        direction_name="forward",
+    )
+
+    assert torch.equal(selected, pool[1:11])
+    with pytest.raises(ValueError, match="num_bridges must be positive"):
+        bridge_plot._select_bridge_initial_samples(
+            pool, sample_index=0, num_bridges=0, direction_name="forward"
+        )
+    with pytest.raises(ValueError, match="out of range"):
+        bridge_plot._select_bridge_initial_samples(
+            pool, sample_index=3, num_bridges=10, direction_name="forward"
+        )
+
+
+def test_bridge_arrays_keep_all_successful_bridges(monkeypatch):
+    bridge_plot = _load_gaussian_bridge_plot(monkeypatch)
+    solution = _synthetic_solution(3, num_pairs=5)
+    eval_config = SimpleNamespace(
+        plot_dir1=0,
+        plot_dir2=1,
+        plot_xlim=[0.0, 0.0],
+        plot_ylim=[0.0, 0.0],
+    )
+
+    bridge = bridge_plot._bridge_arrays(
+        solution,
+        SimpleNamespace(has_linear=False),
+        eval_config,
+    )
+
+    assert bridge.mean_plot.shape == (3, 4, 2)
+    assert bridge.std.shape == (3, 4)
+    assert bridge.x0_plot.shape == (3, 2)
+
+
+def test_bridge_background_uses_local_high_contrast_style(monkeypatch):
+    pytest.importorskip("matplotlib")
+    bridge_plot = _load_gaussian_bridge_plot(monkeypatch)
+    import matplotlib.pyplot as plt
+
+    captured = {}
+
+    def capture_contour(ax, potential, source_reference, evaluation_config, **kwargs):
+        captured["source_reference"] = source_reference
+        captured.update(kwargs)
+
+    monkeypatch.setattr(bridge_plot, "_plot_linear_contour", capture_contour)
+    bridge = SimpleNamespace(
+        x0=torch.zeros(3, 2),
+        x1=torch.ones(3, 2),
+        mean=torch.zeros(3, 4, 2),
+        low=np.array([-1.0, -1.0]),
+        high=np.array([1.0, 1.0]),
+    )
+    fig, ax = plt.subplots()
+
+    bridge_plot._draw_bridge_background(
+        ax,
+        bridge=bridge,
+        potential=SimpleNamespace(has_linear=True),
+        evaluation_config=SimpleNamespace(),
+        potential_background=True,
+    )
+
+    assert np.allclose(ax.get_facecolor(), (1.0, 1.0, 1.0, 1.0))
+    assert captured["source_reference"].shape[0] == 1
+    assert captured["fill_alpha"] == 0.25
+    assert captured["line_color"] == "0.15"
+    assert captured["line_width"] == 0.9
+    assert captured["line_alpha"] == 0.9
+    plt.close(fig)
+
+
 def test_save_gaussian_bridge_static_plot_smoke(monkeypatch, tmp_path):
     pytest.importorskip("matplotlib")
     bridge_plot = _load_gaussian_bridge_plot(monkeypatch)
@@ -145,7 +248,7 @@ def test_save_gaussian_bridge_static_plot_smoke(monkeypatch, tmp_path):
     bridge_plot._save_gaussian_bridge_static_plot(
         output_path=output_path,
         tag="smoke",
-        solution=_synthetic_solution(),
+        solution=_synthetic_solution(3),
         potential=potential,
         evaluation_config=eval_config,
         num_frames=4,
@@ -170,7 +273,7 @@ def test_save_gaussian_bridge_gif_smoke(monkeypatch, tmp_path):
     bridge_plot._save_gaussian_bridge_gif(
         gif_path=gif_path,
         tag="smoke",
-        solution=_synthetic_solution(),
+        solution=_synthetic_solution(3),
         potential=potential,
         evaluation_config=eval_config,
         fps=4,
@@ -200,9 +303,15 @@ def test_create_gaussian_bridge_visualizations_uses_learned_guess(monkeypatch, t
         def integrate(self, model, x0):
             states = torch.stack([x0, x0 + 0.5, x0 + 1.0], dim=0)
             velocities = torch.ones_like(states)
-            return SimpleNamespace(states=states, velocities=velocities)
+            return SimpleNamespace(
+                states=states, velocities=velocities,
+                time_grid=torch.tensor([0.0, 0.5, 1.0]),
+            )
 
-        def prepare_bridge_guess(self, states, velocities, x0, x1, *, reverse, bridge_steps):
+        def prepare_bridge_guess(
+            self, states, velocities, x0, x1, *, reverse, bridge_steps,
+            correct_terminal_guess=True, time_grid=None,
+        ):
             captured["guess_inputs"] = {
                 "states": states.clone(),
                 "velocities": velocities.clone(),
@@ -210,8 +319,13 @@ def test_create_gaussian_bridge_visualizations_uses_learned_guess(monkeypatch, t
                 "x1": x1.clone(),
                 "reverse": reverse,
                 "bridge_steps": bridge_steps,
+                "correct_terminal_guess": correct_terminal_guess,
             }
-            return np.full((1, bridge_steps + 1, 2), 3.0), np.full((1, bridge_steps + 1, 2), 4.0)
+            batch_size = states.shape[1]
+            return (
+                np.full((batch_size, bridge_steps + 1, 2), 3.0),
+                np.full((batch_size, bridge_steps + 1, 2), 4.0),
+            )
 
     class DummyBridgeSolver:
         def __init__(self, *args, **kwargs):
@@ -224,7 +338,7 @@ def test_create_gaussian_bridge_visualizations_uses_learned_guess(monkeypatch, t
                 "mean_guess": mean_guess.copy(),
                 "mean_velocity_guess": mean_velocity_guess.copy(),
             }
-            return _synthetic_solution()
+            return _synthetic_solution(x0.shape[0] - 2, num_pairs=x0.shape[0])
 
     train_config = SimpleNamespace(
         dtype="float32",
@@ -260,18 +374,49 @@ def test_create_gaussian_bridge_visualizations_uses_learned_guess(monkeypatch, t
     monkeypatch.setattr(
         bridge_plot,
         "_prepare_evaluation_split",
-        lambda *args, **kwargs: (torch.tensor([[1.0, 2.0]]), torch.tensor([[9.0, 10.0]])),
+        lambda *args, **kwargs: (
+            torch.arange(24, dtype=torch.float32).reshape(12, 2),
+            torch.arange(24, 48, dtype=torch.float32).reshape(12, 2),
+        ),
     )
     monkeypatch.setattr(bridge_plot, "_save_gaussian_bridge_static_plot", lambda **kwargs: kwargs["output_path"])
     monkeypatch.setattr(bridge_plot, "_save_gaussian_bridge_gif", lambda **kwargs: kwargs["gif_path"])
 
-    rows = bridge_plot.create_gaussian_bridge_visualizations(tmp_path, node_steps=7)
+    rows = bridge_plot.create_gaussian_bridge_visualizations(
+        tmp_path,
+        sample_index=1,
+        node_steps=7,
+    )
 
     assert len(rows) == 1
     assert captured["node_solver"] == ("euler", 7)
     assert captured["guess_inputs"]["reverse"] is False
     assert captured["guess_inputs"]["bridge_steps"] == 2
+    assert captured["guess_inputs"]["correct_terminal_guess"] is True
     assert np.all(captured["solve_batch"]["mean_guess"] == 3.0)
     assert np.all(captured["solve_batch"]["mean_velocity_guess"] == 4.0)
-    assert torch.equal(captured["solve_batch"]["x0"], torch.tensor([[1.0, 2.0]]))
-    assert torch.equal(captured["solve_batch"]["x1"], torch.tensor([[2.0, 3.0]]))
+    expected_x0 = torch.arange(24, dtype=torch.float32).reshape(12, 2)[1:11]
+    assert torch.equal(captured["solve_batch"]["x0"], expected_x0)
+    assert torch.equal(captured["solve_batch"]["x1"], expected_x0 + 1.0)
+    assert rows[0]["num_bridges_requested"] == 10
+    assert rows[0]["num_bridges_successful"] == 8
+    assert rows[0]["num_bridges_failed"] == 2
+    assert rows[0]["failed_indices"] == [8, 9]
+    assert "samples1-10_count10" in rows[0]["static_path"]
+
+
+
+def test_deterministic_scale_paths_have_no_legend():
+    import matplotlib.pyplot as plt
+
+    plotting = importlib.import_module("whfm.evaluation.plotting")
+    fig, ax = plt.subplots()
+    time = np.asarray([0.0, 0.5, 1.0])
+    std_paths = np.asarray([[0.2, 0.3, 0.2], [0.4, 0.5, 0.4]])
+
+    plotting._plot_scale_paths(ax, time, std_paths)
+
+    assert len(ax.lines) == 2
+    assert all(line.get_linestyle() == "-" for line in ax.lines)
+    assert ax.get_legend() is None
+    plt.close(fig)

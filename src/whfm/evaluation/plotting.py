@@ -458,6 +458,19 @@ def save_warmup_plots(
     }
 
 
+def _plot_scale_paths(ax, time, std_paths) -> None:
+    """Plot the Gaussian standard-deviation paths."""
+
+    for std_path in std_paths:
+        ax.plot(
+            time,
+            std_path,
+            alpha=0.5,
+            linewidth=PUBLICATION_LINE_WIDTH,
+            linestyle="-",
+        )
+
+
 def save_bridge_solution_plots(
     *,
     figures_dir: Path,
@@ -521,9 +534,9 @@ def save_bridge_solution_plots(
     plt.close(fig)
 
     fig, ax = _publication_subplots(plt)
-    ax.plot(t_np, std_plot.T, alpha=0.5, linewidth=PUBLICATION_LINE_WIDTH)
+    _plot_scale_paths(ax, t_np, std_plot)
     ax.set_xlabel("t")
-    ax.set_ylabel("std")
+    ax.set_ylabel("scale")
     std_path = figures_dir / f"{tag}_std_paths.png"
     _style_axis(ax)
     fig.savefig(std_path, bbox_inches="tight", dpi=PUBLICATION_DPI)
@@ -608,6 +621,10 @@ def _plot_linear_contour(
     evaluation_config,
     *,
     domain_tensors: Iterable[Tensor] | None = None,
+    fill_alpha: float = 0.10,
+    line_color: str = "0.25",
+    line_width: float = 0.6,
+    line_alpha: float = 0.7,
 ) -> None:
     if not getattr(potential, "has_linear", False):
         return
@@ -638,7 +655,7 @@ def _plot_linear_contour(
         grid_y_np,
         values,
         levels=35,
-        alpha=0.10,
+        alpha=fill_alpha,
         cmap=POTENTIAL_COLORMAP,
     )
     ax.contour(
@@ -646,7 +663,7 @@ def _plot_linear_contour(
         grid_y_np,
         values,
         levels=contour_fill.levels,
-        colors="0.25",
-        linewidths=0.6,
-        alpha=0.7,
+        colors=line_color,
+        linewidths=line_width,
+        alpha=line_alpha,
     )

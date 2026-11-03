@@ -1,4 +1,5 @@
 seed: 0
+tau: 1.0e-3
 device: auto
 cuda_device: null
 dtype: float32
@@ -33,11 +34,15 @@ rectification:
 node_solver:
   method: euler
   node_steps: 1000
+  correct_terminal_guess: true
 
 bridge_solver:
   kind: scipy
   sigma_source: 1.0e-4
-  sigma_target: 1.0e-4
+  sigma_target: 0.0
+  entropy_reference_max_iterations: 1
+  entropy_reference_tolerance: 1.0e-3
+  entropy_reference_relaxation: 0.5
   bridge_steps: 50
   tol: 1.0e-2
   max_nodes: 200

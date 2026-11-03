@@ -126,7 +126,7 @@ def create_particle_evolution_gifs(
     """Load a trainer run, evaluate saved models, and create rollout GIFs."""
 
     run_dir = Path(run_dir)
-    train_config = load_train_config(run_dir / "resolved_train.yaml")
+    train_config = _load_run_train_config(run_dir)
     problem_config = load_problem_config(run_dir / "resolved_problem.yaml")
     dtype = _resolve_dtype(train_config.dtype)
     resolved_device = _resolve_device(device or train_config.device)
@@ -136,10 +136,13 @@ def create_particle_evolution_gifs(
     specs = available_model_specs(checkpoint_state, direction=direction, model_kind=model_kind)
 
     potential = ConfiguredPotential(problem_config.functional.to_potential_cfg())
-    node_solver = NodeSolver(
-        train_config.node_solver.method,
-        node_steps=train_config.node_solver.node_steps if node_steps is None else int(node_steps),
-    )
+    solver_kwargs = {
+        "node_steps": train_config.node_solver.node_steps if node_steps is None else int(node_steps),
+    }
+    time_end = getattr(train_config.node_solver, "time_end", 1.0)
+    if time_end != 1.0:
+        solver_kwargs["time_end"] = time_end
+    node_solver = NodeSolver(train_config.node_solver.method, **solver_kwargs)
     source_test, target_test = _prepare_evaluation_split(
         train_config,
         problem_config,
@@ -610,6 +613,15 @@ def _save_particle_evolution_gif(
 def _flatten_positions(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     points = np.asarray(values).reshape(-1, 2)
     return points[:, 0], points[:, 1]
+
+
+def _load_run_train_config(run_dir: Path):
+    v2_path = run_dir / "resolved_train_v2.yaml"
+    if v2_path.exists():
+        from ..trainer_v2 import load_train_v2_config
+
+        return load_train_v2_config(v2_path)
+    return load_train_config(run_dir / "resolved_train.yaml")
 
 
 def _resolve_dtype(name: str) -> torch.dtype:

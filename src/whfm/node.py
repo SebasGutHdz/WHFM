@@ -21,18 +21,28 @@ def call_velocity_model(model: torch.nn.Module, x: Tensor, t: Tensor) -> Tensor:
 
 
 class NodeSolver:
-    """Integrate a learned velocity field on a fixed time grid."""
+    """Integrate a learned drift on a fixed grid."""
 
-    def __init__(self, method: str = "euler", node_steps: int = 100):
+    def __init__(
+        self,
+        method: str = "euler",
+        node_steps: int = 100,
+        time_end: float = 1.0,
+    ):
         if method not in {"euler", "rk4"}:
             raise ValueError("method must be 'euler' or 'rk4'.")
         if node_steps <= 0:
             raise ValueError("node_steps must be positive.")
+        if not 0.0 < time_end <= 1.0:
+            raise ValueError("time_end must be in (0, 1].")
         self.method = method
         self.node_steps = int(node_steps)
+        self.time_end = float(time_end)
 
     def time_grid(self, *, device, dtype) -> Tensor:
-        return torch.linspace(0.0, 1.0, self.node_steps + 1, device=device, dtype=dtype)
+        return torch.linspace(
+            0.0, self.time_end, self.node_steps + 1, device=device, dtype=dtype
+        )
 
     @torch.no_grad()
     def integrate(self, model: torch.nn.Module, x0: Tensor) -> NodeTrajectory:
@@ -94,6 +104,19 @@ class NodeSolver:
         indices = cls.bridge_indices(states.shape[0], bridge_steps, device=states.device)
         return states.index_select(0, indices), velocities.index_select(0, indices), indices
 
+    @staticmethod
+    def _interpolate_time_grid(
+        values: Tensor, source_grid: Tensor, target_grid: Tensor
+    ) -> Tensor:
+        right = torch.searchsorted(source_grid, target_grid, right=False).clamp(
+            1, source_grid.numel() - 1
+        )
+        left = right - 1
+        weight = (target_grid - source_grid[left]) / (
+            source_grid[right] - source_grid[left]
+        ).clamp_min(torch.finfo(source_grid.dtype).eps)
+        return values[left] + weight.reshape(-1, 1, 1) * (values[right] - values[left])
+
     @classmethod
     def prepare_bridge_guess(
         cls,
@@ -104,42 +127,91 @@ class NodeSolver:
         *,
         reverse: bool,
         bridge_steps: int,
+        correct_terminal_guess: bool = True,
+        time_grid: Tensor | None = None,
     ):
         if states.dim() != 3:
             raise ValueError("states must have shape (time, batch, dim).")
         if velocities.shape != states.shape:
             raise ValueError("velocities must match states shape.")
+        x0_flat = x0.detach().reshape(x0.shape[0], -1).to(
+            device=states.device, dtype=states.dtype
+        )
+        x1_flat = x1.detach().reshape(x1.shape[0], -1).to(
+            device=states.device, dtype=states.dtype
+        )
         mean = states.detach()
         mean_velocity = velocities.detach()
+        source_grid = None
+        if time_grid is not None:
+            source_grid = time_grid.detach().reshape(-1).to(
+                device=states.device, dtype=states.dtype
+            )
+            if source_grid.numel() != states.shape[0]:
+                raise ValueError("time_grid must have one value per trajectory state.")
+            if not torch.all(source_grid[1:] > source_grid[:-1]):
+                raise ValueError("time_grid must be strictly increasing.")
+            if not torch.isclose(source_grid[0], torch.zeros_like(source_grid[0])):
+                raise ValueError("time_grid must start at 0.")
+            if source_grid[-1] <= 0.0 or source_grid[-1] > 1.0:
+                raise ValueError("time_grid must end in (0, 1].")
         if reverse:
             mean = torch.flip(mean, dims=(0,))
             mean_velocity = -torch.flip(mean_velocity, dims=(0,))
-        mean, mean_velocity, _ = cls.subsample_for_bridge(mean, mean_velocity, bridge_steps)
+            if source_grid is not None:
+                source_grid = source_grid[-1] - torch.flip(source_grid, dims=(0,))
+
+        if source_grid is None or source_grid[-1] == 1.0:
+            mean, mean_velocity, _ = cls.subsample_for_bridge(
+                mean, mean_velocity, bridge_steps
+            )
+        else:
+            target_grid = torch.linspace(
+                0.0, 1.0, bridge_steps + 1, device=states.device, dtype=states.dtype
+            )
+            time_end = source_grid[-1]
+            interpolation_grid = target_grid.clamp_max(time_end)
+            mean = cls._interpolate_time_grid(mean, source_grid, interpolation_grid)
+            mean_velocity = cls._interpolate_time_grid(
+                mean_velocity, source_grid, interpolation_grid
+            )
+            if correct_terminal_guess:
+                tail_mask = target_grid > time_end
+                tail_duration = 1.0 - time_end
+                alpha = ((target_grid - time_end) / tail_duration).clamp(0.0, 1.0)
+                last_mean = mean[-1]
+                tail_mean = last_mean.unsqueeze(0) + alpha.reshape(-1, 1, 1) * (
+                    x1_flat.unsqueeze(0) - last_mean.unsqueeze(0)
+                )
+                tail_velocity = (x1_flat - last_mean) / tail_duration
+                mean = torch.where(tail_mask.reshape(-1, 1, 1), tail_mean, mean)
+                mean_velocity = torch.where(
+                    tail_mask.reshape(-1, 1, 1),
+                    tail_velocity.unsqueeze(0).expand_as(mean_velocity),
+                    mean_velocity,
+                )
+
         mean_guess = mean.permute(1, 0, 2).contiguous().clone()
         velocity_guess = mean_velocity.permute(1, 0, 2).contiguous().clone()
-        x0_flat = x0.detach().reshape(x0.shape[0], -1).to(
-            device=mean_guess.device, dtype=mean_guess.dtype
-        )
-        x1_flat = x1.detach().reshape(x1.shape[0], -1).to(
-            device=mean_guess.device, dtype=mean_guess.dtype
-        )
         mean_guess[:, 0, :] = x0_flat
-        mean_guess[:, -1, :] = x1_flat
+        if correct_terminal_guess:
+            mean_guess[:, -1, :] = x1_flat
         expected_shape = (x0_flat.shape[0], int(bridge_steps) + 1, x0_flat.shape[1])
         if tuple(mean_guess.shape) != expected_shape:
-            raise ValueError(f"mean bridge guess must have shape {expected_shape}; got {tuple(mean_guess.shape)}.")
+            raise ValueError(
+                f"mean bridge guess must have shape {expected_shape}; got {tuple(mean_guess.shape)}."
+            )
         if tuple(velocity_guess.shape) != expected_shape:
             raise ValueError(
                 f"velocity bridge guess must have shape {expected_shape}; got {tuple(velocity_guess.shape)}."
             )
         if not torch.allclose(mean_guess[:, 0, :], x0_flat):
             raise ValueError("mean bridge guess does not start at the BVP source endpoint.")
-        if not torch.allclose(mean_guess[:, -1, :], x1_flat):
+        if correct_terminal_guess and not torch.allclose(mean_guess[:, -1, :], x1_flat):
             raise ValueError("mean bridge guess does not end at the BVP target endpoint.")
         return mean_guess.detach().cpu().numpy(), velocity_guess.detach().cpu().numpy()
 
-    @staticmethod
-    def _velocity_at(model: torch.nn.Module, x: Tensor, t_value: Tensor) -> Tensor:
+    def _velocity_at(self, model: torch.nn.Module, x: Tensor, t_value: Tensor) -> Tensor:
         t = t_value.reshape(1, 1).expand(x.shape[0], 1)
         return call_velocity_model(model, x, t)
 

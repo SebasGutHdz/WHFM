@@ -25,15 +25,17 @@ model uses a scalar Gaussian conditional path
     \qquad t\in[0,1].
 \]
 
-The general theory permits endpoint scales \(s_0=\sigma_0\) and
-\(s_1=\sigma_1\). The current training implementation supports the equal-scale
-case only:
+The training implementation supports a positive source scale and a
+nonnegative target scale. The equal-scale case uses
+`bridge_solver.sigma`; v2 can also set `bridge_solver.sigma_source` and
+`bridge_solver.sigma_target` explicitly, including a zero target scale:
 
 \[
-    m_0=x_0,\qquad m_1=x_1,\qquad s_0=s_1=\sigma,
+    m_0=x_0,\qquad m_1=x_1,\qquad s_0=\sigma_0>0,\qquad s_1=\sigma_1\geq 0.
 \]
 
-where `bridge_solver.sigma` is strictly positive.
+For a zero target scale, v2 requires `tau > 0`; its deterministic NODE ends at
+`time_end = 1 - tau`, while the Gaussian BVP still ends at time 1.
 
 For \(X_t=m_t+s_t\varepsilon\),
 \(\varepsilon\sim\mathcal N(0,I_d)\), the conditional velocity target is
@@ -323,9 +325,10 @@ The current scalar BVP solver:
 
 - runs SciPy `solve_bvp` serially, one pair at a time, on CPU;
 - uses learned NODE guesses for mean and mean velocity when supplied;
-- defaults to constant \(s=\sigma\) and \(\dot s=0\) guesses;
-- enforces both mean endpoints and `std(0) = std(1) = sigma`;
-- rejects nonpositive standard-deviation paths;
+- uses source and target scales to initialize the standard-deviation guess;
+- enforces both mean endpoints and the configured source and target scales;
+- rejects nonpositive standard deviations in the interior and permits a zero
+  target standard deviation when configured;
 - returns successful pairs or raises according to `failure_policy`;
 - records solve time, SciPy iterations, mesh nodes, failures, and endpoint
   errors.
@@ -345,16 +348,15 @@ the solver boundary.
 energies. Use its explicit component methods:
 
 - `linear_energy`, `linear_gradient`;
-- `internal_energy`;
+- `internal_energy`, `internal_gradient_from_gaussian_mixture`;
 - `interaction_energy`, `interaction_gradient`.
 
-The trainable mean/std BVP currently uses `linear_gradient` and, when present,
-an interaction gradient with frozen reference samples. It does not include the
-configured internal force in its RHS. `DensityGaussianPath` and the internal
-potential schedules are separate legacy/analytic paths. Do not assume that
-selecting `functional.internal` in a training problem automatically produces
-the correct Hamiltonian Gaussian BVP; implement and test that force before
-advertising support.
+The trainable mean/std BVP uses `linear_gradient` and, when configured,
+interaction and entropy gradients against frozen reference samples. The
+entropy force uses the score of the reference Gaussian mixture. A positive
+`entropy_density_std_floor` stabilizes that reference at a zero target scale;
+it does not change the BVP boundary. The configured coefficient is applied
+once in `ConfiguredPotential`.
 
 Potential sign conventions matter. The training path uses Hamiltonian force
 `-gradient`, while evaluation reports action as kinetic integral minus

@@ -317,6 +317,8 @@ def evaluate_warmup_model_with_terminal(
         "direction": direction,
         "model_kind": model_kind,
         "num_eval_samples": int(source_eval.shape[0]),
+        "integration_end_time": float(traj.time_grid[-1].detach().cpu()),
+        "tau": 1.0 - float(traj.time_grid[-1].detach().cpu()),
         "latest_warmup_loss": latest_warmup_loss,
         "sample_path": artifact_paths["trajectory_path"],
         "previous_terminal_path": previous_path_value,
@@ -422,6 +424,8 @@ def evaluate_model_with_terminal(
         "direction": direction,
         "model_kind": model_kind,
         "num_eval_samples": int(source_eval.shape[0]),
+        "integration_end_time": float(traj.time_grid[-1].detach().cpu()),
+        "tau": 1.0 - float(traj.time_grid[-1].detach().cpu()),
         "latest_loss": latest_loss,
         "previous_terminal_path": previous_path_value,
         "rectification_residual": rectification_residual_from_file(

@@ -31,7 +31,7 @@ from .config import (
     load_problem_config,
 )
 from .directions import Direction, DirectionState
-from .losses import flow_matching_loss
+from .losses import gaussian_sample_and_target, flow_matching_loss
 from .node import call_velocity_model
 from .trainer import HamiltonianTrainer
 
@@ -130,12 +130,14 @@ class TrainV2Config:
     optimization: OptimizationConfig
     ema: EMAConfig
     output: OutputConfig
+    tau: float = 0.0
     cuda_device: int | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "TrainV2Config":
         data = dict(_require_mapping(data, "train_v2 config"))
         data.setdefault("cuda_device", None)
+        data.setdefault("tau", 0.0)
         allowed = {field.name for field in fields(cls)}
         extra = set(data) - allowed
         missing = allowed - set(data)
@@ -151,6 +153,16 @@ class TrainV2Config:
             raise ValueError("dtype must be 'float32' or 'float64'.")
         cuda_device = _resolve_cuda_device(data["cuda_device"])
         device = f"cuda:{cuda_device}" if cuda_device is not None else str(data["device"])
+        tau = float(data["tau"])
+        if not 0.0 <= tau < 1.0:
+            raise ValueError("tau must be in [0, 1).")
+        node_solver = NodeSolverConfig.from_dict(data["node_solver"])
+        expected_time_end = 1.0 - tau
+        if "time_end" in data["node_solver"] and not math.isclose(
+            node_solver.time_end, expected_time_end, rel_tol=0.0, abs_tol=1e-12
+        ):
+            raise ValueError("node_solver.time_end must equal 1 - tau in trainer_v2.")
+        node_solver = replace(node_solver, time_end=expected_time_end)
         cfg = cls(
             seed=int(data["seed"]),
             device=device,
@@ -159,15 +171,25 @@ class TrainV2Config:
             model=ModelConfig.from_dict(data["model"]),
             initial_fit=InitialFitConfig.from_dict(data["initial_fit"]),
             rectification=RectificationV2Config.from_dict(data["rectification"]),
-            node_solver=NodeSolverConfig.from_dict(data["node_solver"]),
+            node_solver=node_solver,
             bridge_solver=BridgeSolverConfig.from_dict(data["bridge_solver"]),
             optimization=OptimizationConfig.from_dict(data["optimization"]),
             ema=EMAConfig.from_dict(data["ema"]),
             output=OutputConfig.from_dict(data["output"]),
+            tau=tau,
             cuda_device=cuda_device,
         )
         if cfg.bridge_solver.bridge_steps > cfg.node_solver.node_steps:
             raise ValueError("bridge_solver.bridge_steps must be <= node_solver.node_steps.")
+        if cfg.bridge_solver.sigma_target == 0.0:
+            if cfg.tau <= 0.0:
+                raise ValueError("sigma_target: 0 requires tau > 0 in trainer_v2.")
+            if cfg.rectification.coupling_generation != "own_ema" or list(
+                cfg.rectification.direction_order
+            ) != ["forward"]:
+                raise ValueError(
+                    "sigma_target: 0 currently requires own_ema with direction_order: [forward]."
+                )
         return cfg
 
 
@@ -232,7 +254,13 @@ class BridgeTargetSet:
         for start in range(0, usable, batch_size):
             yield perm[start : start + batch_size]
 
-    def sample_batch(self, indices: Tensor, *, device: torch.device, dtype: torch.dtype):
+    def sample_batch(
+        self, indices: Tensor, *, device: torch.device, dtype: torch.dtype,
+        time_end: float = 1.0,
+    ):
+        time_end = float(time_end)
+        if not 0.0 < time_end <= 1.0:
+            raise ValueError("time_end must be in (0, 1].")
         indices = indices.to(device=self.mean.device)
         mean = self.mean.index_select(0, indices).to(device=device, dtype=dtype)
         mean_velocity = self.mean_velocity.index_select(0, indices).to(device=device, dtype=dtype)
@@ -240,16 +268,18 @@ class BridgeTargetSet:
         std_velocity = self.std_velocity.index_select(0, indices).to(device=device, dtype=dtype)
         time_grid = self.time_grid.to(device=device, dtype=dtype)
 
-        t = torch.rand((mean.shape[0], 1), device=device, dtype=dtype)
+        t = time_end * torch.rand((mean.shape[0], 1), device=device, dtype=dtype)
         epsilon = torch.randn_like(mean[:, 0, :])
         mu_t = self._interpolate(mean, time_grid, t)
         mu_dot_t = self._interpolate(mean_velocity, time_grid, t)
         sigma_t = self._interpolate(std, time_grid, t)
         sigma_dot_t = self._interpolate(std_velocity, time_grid, t)
-        if torch.any(sigma_t <= 0):
-            raise RuntimeError("Cached mean/std BVP contains a nonpositive sigma value.")
-        xt = mu_t + sigma_t * epsilon
-        target = mu_dot_t + (sigma_dot_t / sigma_t) * (xt - mu_t)
+        try:
+            xt, target = gaussian_sample_and_target(
+                mu_t, mu_dot_t, sigma_t, sigma_dot_t, epsilon
+            )
+        except ValueError as exc:
+            raise RuntimeError("Cached mean/std BVP contains a nonpositive sigma value.") from exc
         return xt, t, target
 
     @staticmethod
@@ -270,6 +300,15 @@ class HamiltonianTrainerV2(HamiltonianTrainer):
     train_config: TrainV2Config
 
     def __init__(self, train_config: TrainV2Config, problem_config: ProblemConfig):
+        if (
+            train_config.bridge_solver.sigma_target == 0.0
+            and problem_config.functional.internal is not None
+            and train_config.bridge_solver.entropy_density_std_floor is None
+        ):
+            raise ValueError(
+                "sigma_target: 0 with an internal potential requires "
+                "bridge_solver.entropy_density_std_floor."
+            )
         super().__init__(train_config, problem_config)
         dump_resolved_yaml(self.run_dir / "resolved_train_v2.yaml", train_config)
         dump_resolved_yaml(self.run_dir / "resolved_train.yaml", self._v1_compatible_config(train_config))
@@ -348,7 +387,10 @@ class HamiltonianTrainerV2(HamiltonianTrainer):
             )
             for indices in pbar:
                 state.optimizer.zero_grad(set_to_none=True)
-                xt, t, target = target_set.sample_batch(indices, device=self.device, dtype=self.dtype)
+                xt, t, target = target_set.sample_batch(
+                    indices, device=self.device, dtype=self.dtype,
+                    time_end=self.train_config.node_solver.time_end,
+                )
                 prediction = call_velocity_model(state.model, xt, t)
                 loss = flow_matching_loss(prediction, target)
                 self._check_finite(loss, "cached bridge loss")

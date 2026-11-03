@@ -42,6 +42,31 @@ python trainer_v2.py --train-config configs/train_v2.yaml \
   --problem-config configs/problems/stunnel.yaml
 ```
 
+### Zero-terminal Gaussian bridges
+
+The v2 forward `own_ema` configuration can set
+`bridge_solver.sigma_source > 0` and `bridge_solver.sigma_target: 0.0`.
+Set top-level `tau` in `(0, 1)`. NODE rollout, evaluation, and training-time
+sampling then end at `t = 1 - tau`; the Gaussian BVP and its boundary
+conditions remain on `[0, 1]`. The conditional target is evaluated only at
+positive standard deviation. Existing equal-scale configurations remain valid
+with `tau: 0`.
+
+`node_solver.correct_terminal_guess: true` replaces the NODE guess's terminal
+position with the exact paired target. Setting it to `false` retains the NODE
+terminal position as an initializer ablation. The BVP still enforces its
+configured endpoint in either case.
+
+### Entropy functional
+
+The `entropy` internal potential evaluates a Gaussian-mixture log density and
+uses its analytic score in the BVP force. `entropy_cost` computes the same
+score by autograd for comparison. The configured coefficient is applied once.
+The reference mixture is frozen during each solve; the optional outer
+reference iteration updates it between solves. The density floor stabilizes
+the reference computation near a zero target scale without changing the BVP's
+physical terminal boundary.
+
 ## Seed Sweeps
 
 Sweep manifests define the trainer, base configuration, problem list, seeds,
